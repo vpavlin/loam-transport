@@ -1,0 +1,14 @@
+{
+  "name": "scala_core",
+  "version": "0.1.0",
+  "type": "core",
+  "interface": "universal",
+  "description": "scala engine and sync core. Delivery via the shared logos-transport (SDS Reliable Channels). ASCII-only description (non-ASCII breaks the JSON stamper).",
+  "main": "scala_core_plugin",
+  "dependencies": ["delivery_module"],
+  "nix": {
+    "packages": { "build": ["openssl"], "runtime": ["openssl"] },
+    "external_libraries": [],
+    "cmake": { "find_packages": [], "extra_sources": [], "extra_include_dirs": [], "extra_link_libraries": [] }
+  }
+}

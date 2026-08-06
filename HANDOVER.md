@@ -84,6 +84,20 @@ for a headless hub — `delay` (`QTimer::singleShot`). Everything else is handle
   backfill, the two hub gotchas).
 - `logos-distributed-debugging` — the method playbook if it "syncs nothing."
 
+## Build + load the modules (templates provided)
+
+`basecamp/reference/` has copy-paste-ready, known-good templates so you don't have to
+reverse-engineer the build or the hub:
+- `flake.nix` — pins the **channels-enabled** `delivery_module` (`0fb3a742…`) + builder
+  (`afe4430e…`), the same revs KYM/qaku use (one SDK, wire-interop).
+- `metadata.json` — `scala_core` manifest (`type:core`, dep `delivery_module`, ASCII-only).
+- `CMakeLists.txt` — lists `src/logos_transport.hpp` (**git add it** — nix only sees tracked files).
+- `hub-run.sh` + `hub.service` — the headless-hub launcher (pins fleet `entryNodes`, arms
+  the self-drive tick) + systemd unit.
+- `reference/README.md` — how to get `delivery_module` + `capability_module` `.lgx` and a
+  `logoscore` **built on cpp-sdk ≥ `d77c3dd`** (required, or the hub receives nothing), and
+  stage all three modules in one dir.
+
 ## How to test scala's integration
 
 1. **Builds** — `nix build .#lgx-portable` for `scala_core` (this is the real SDK
