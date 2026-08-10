@@ -36,3 +36,7 @@
   consuming app just enables the plugin + calls preferServiceBackend() — no vendored files.
 - ServiceNode gains reconnect (re-bind + re-register + re-subscribe on service restart, grant
   persists so no re-prompt), node-down detection, and launchService().
+
+## 0.7.1
+- Import sha256 from `@noble/hashes/sha2` (works across @noble 1.4+ AND 2.x) instead of the
+  removed `/sha256` subpath — so consumers on any recent @noble version build.

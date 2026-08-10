@@ -7,7 +7,7 @@
 // The proven bring-up (join-before-settle), the listener, storeSync and the double-base64
 // send were moved into RealNode VERBATIM — see real-node.ts. This file is the public shim.
 import { fromByteArray, toByteArray } from "base64-js";
-import { sha256 as sha256hash } from "@noble/hashes/sha256";
+import { sha256 as sha256hash } from "@noble/hashes/sha2";
 import { utf8Bytes as utf8, utf8Decode as fromUtf8 } from "./utf8";
 import { SharedDeliveryNode, Tenant } from "./broker";
 import { RealNode } from "./real-node";
