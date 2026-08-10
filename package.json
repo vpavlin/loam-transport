@@ -1,6 +1,6 @@
 {
   "name": "logos-transport",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Shared crypto-agnostic sync transport over liblogosdelivery + SDS Reliable Channels. Mobile (React Native/Expo, arm64 Android) + Basecamp (C++) sides, wire-compatible. Proven in KYM + qaku.",
   "main": "src/logos-transport.ts",
   "files": ["src", "native", "plugins", "basecamp", "docs", "examples", "README.md"],

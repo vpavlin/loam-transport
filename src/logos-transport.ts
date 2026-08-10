@@ -9,7 +9,7 @@
 import { fromByteArray, toByteArray } from "base64-js";
 import { sha256 as sha256hash } from "@noble/hashes/sha256";
 import { utf8Bytes as utf8, utf8Decode as fromUtf8 } from "./utf8";
-import { SharedDeliveryNode } from "./broker";
+import { SharedDeliveryNode, Tenant } from "./broker";
 import { RealNode } from "./real-node";
 
 // Per-stage diagnostic counters (surface in a Sync card). rxOpened/rxOpenFail are the
@@ -112,6 +112,24 @@ const tenant = shared.registerTenant("app").onMessage(
 export function deliveryAvailable(): boolean { return RealNode.available(); }
 export function getStoreInfo(): string { return realNode.storeInfo; }
 export function getCtx(): string { return realNode.getCtx(); }
+
+// ---- multi-tenant API for the shared-delivery SERVICE ----
+// A single-app consumer (qaku/kym) uses start()/join()/publishSealed() unchanged (the
+// implicit "app" tenant above). The SERVICE, which owns the device-wide node, registers
+// ONE tenant per bound client app instead: each client subscribes via its Tenant, sends
+// via publishSealed(topic,bytes) (send is node-level), and receives via its onMessage,
+// routed by content topic. Bring the node up first with start({topics:[], …}).
+export function registerClient(appId: string, onMessage: (topic: string, candidates: Uint8Array[]) => boolean): Tenant {
+  return shared.registerTenant(appId).onMessage(onMessage);
+}
+export function clientSubscribe(appId: string, topic: string): Promise<void> {
+  const t = shared.tenants.get(appId);
+  return t ? t.subscribe(topic) : Promise.resolve();
+}
+export function unregisterClient(appId: string): Promise<void> {
+  const t = shared.tenants.get(appId);
+  return t ? t.close() : Promise.resolve();
+}
 
 // Bring the node up (or, if up, join new topics), then record topic ownership so the
 // broker routes those topics to this app's tenant.

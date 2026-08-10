@@ -91,6 +91,15 @@ export class Tenant {
     await this.broker._subscribe(this.id, topic);
   }
 
+  // Release everything this tenant owns (unsubscribe its topics, drop it). Used by the
+  // shared-delivery service when a bound client disconnects.
+  async close(): Promise<void> {
+    for (const t of this.topics) await this.broker._unsubscribe(this.id, t);
+    this.topics.clear();
+    this.broker.tenants.delete(this.id);
+    this.cb = null;
+  }
+
   _deliver(topic: string, payload: any): boolean {
     return this.cb ? this.cb(topic, payload) : false;
   }

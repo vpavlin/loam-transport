@@ -11,3 +11,7 @@
 
 ## 0.1.0
 - Initial extraction from KYM + qaku (mobile `src/`/`native/`/`plugins/`, C++ `basecamp/`).
+
+## 0.3.0
+- Multi-tenant API for the shared-delivery SERVICE: `registerClient`/`clientSubscribe`/
+  `unregisterClient` + `Tenant.close()`. Single-app consumers (qaku/kym) unchanged.
