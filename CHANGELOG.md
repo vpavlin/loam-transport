@@ -15,3 +15,8 @@
 ## 0.3.0
 - Multi-tenant API for the shared-delivery SERVICE: `registerClient`/`clientSubscribe`/
   `unregisterClient` + `Tenant.close()`. Single-app consumers (qaku/kym) unchanged.
+
+## 0.4.0
+- `ServiceNode` (AIDL-client UnderlyingNode) + lazy backend selection: `preferServiceBackend(true, appId)`
+  makes a client route through the device-wide Logos Delivery service; default stays RealNode.
+  Fixed the tenant/adopt id mismatch (now consistently "app").

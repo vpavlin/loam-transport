@@ -11,6 +11,7 @@ import { sha256 as sha256hash } from "@noble/hashes/sha256";
 import { utf8Bytes as utf8, utf8Decode as fromUtf8 } from "./utf8";
 import { SharedDeliveryNode, Tenant } from "./broker";
 import { RealNode } from "./real-node";
+import { ServiceNode } from "./service-node";
 
 // Per-stage diagnostic counters (surface in a Sync card). rxOpened/rxOpenFail are the
 // app's open() outcome, reported back via onReceive's return value.
@@ -97,21 +98,34 @@ export function payloadCandidates(payload: any): Uint8Array[] {
 }
 
 // ---- the one node, behind the broker seam ----
+// The backend is chosen LAZILY at first use: RealNode (this process runs the node) by
+// default, or ServiceNode (bind the device-wide shared service over AIDL) when a client app
+// opts in via preferServiceBackend() and the client native module is present. A single-app
+// consumer uses start()/join()/publishSealed(); the SERVICE uses registerClient() per tenant.
 let onReceiveCb: OnReceive | null = null;
-const realNode = new RealNode({
-  counters, diag, payloadCandidates, entryNodes: ENTRY_NODES, buildConfig,
-  SETTLE_MS, FILTER_RENEW_MS, STORE_PAGE, STORE_TIMEOUT_MS, STORE_MAX_PAGES,
-});
-const shared = new SharedDeliveryNode(realNode);
-// qaku is a single tenant today; the tenant callback opens (decrypts) via the app's
-// onReceive and reports back whether it opened, which drives the rx counters in RealNode.
-const tenant = shared.registerTenant("app").onMessage(
-  (topic: string, cands: Uint8Array[]) => (onReceiveCb ? onReceiveCb(topic, cands) : false),
-);
+let preferService = false;
+let clientAppId = "app";
+export function preferServiceBackend(on: boolean, appId?: string) { preferService = on; if (appId) clientAppId = appId; }
 
-export function deliveryAvailable(): boolean { return RealNode.available(); }
-export function getStoreInfo(): string { return realNode.storeInfo; }
-export function getCtx(): string { return realNode.getCtx(); }
+let backend: RealNode | ServiceNode | null = null;
+let shared: SharedDeliveryNode | null = null;
+let tenant: Tenant | null = null;
+function ensure() {
+  if (shared) return;
+  backend = (preferService && ServiceNode.available())
+    ? new ServiceNode({ appId: clientAppId })
+    : new RealNode({ counters, diag, payloadCandidates, entryNodes: ENTRY_NODES, buildConfig,
+        SETTLE_MS, FILTER_RENEW_MS, STORE_PAGE, STORE_TIMEOUT_MS, STORE_MAX_PAGES });
+  shared = new SharedDeliveryNode(backend);
+  // the app's single tenant opens (decrypts) via onReceive and reports back.
+  tenant = shared.registerTenant("app").onMessage(
+    (topic: string, cands: Uint8Array[]) => (onReceiveCb ? onReceiveCb(topic, cands) : false),
+  );
+}
+
+export function deliveryAvailable(): boolean { return RealNode.available() || ServiceNode.available(); }
+export function getStoreInfo(): string { return backend ? backend.storeInfo : ""; }
+export function getCtx(): string { return backend ? backend.getCtx() : ""; }
 
 // ---- multi-tenant API for the shared-delivery SERVICE ----
 // A single-app consumer (qaku/kym) uses start()/join()/publishSealed() unchanged (the
@@ -120,42 +134,42 @@ export function getCtx(): string { return realNode.getCtx(); }
 // via publishSealed(topic,bytes) (send is node-level), and receives via its onMessage,
 // routed by content topic. Bring the node up first with start({topics:[], …}).
 export function registerClient(appId: string, onMessage: (topic: string, candidates: Uint8Array[]) => boolean): Tenant {
-  return shared.registerTenant(appId).onMessage(onMessage);
+  ensure(); return shared!.registerTenant(appId).onMessage(onMessage);
 }
 export function clientSubscribe(appId: string, topic: string): Promise<void> {
-  const t = shared.tenants.get(appId);
-  return t ? t.subscribe(topic) : Promise.resolve();
+  ensure(); const t = shared!.tenants.get(appId); return t ? t.subscribe(topic) : Promise.resolve();
 }
 export function unregisterClient(appId: string): Promise<void> {
-  const t = shared.tenants.get(appId);
-  return t ? t.close() : Promise.resolve();
+  ensure(); const t = shared!.tenants.get(appId); return t ? t.close() : Promise.resolve();
 }
 
 // Bring the node up (or, if up, join new topics), then record topic ownership so the
 // broker routes those topics to this app's tenant.
 export async function start(opts: { deviceId: string; topics: string[]; onReceive: OnReceive; onStatus?: OnStatus }): Promise<void> {
   onReceiveCb = opts.onReceive;
-  realNode.setDeviceId(opts.deviceId);
-  await realNode.start(opts.topics, opts.onStatus);
-  shared._adopt("qaku", opts.topics);
+  ensure();
+  backend!.setDeviceId(opts.deviceId);
+  await backend!.start(opts.topics, opts.onStatus);
+  shared!._adopt("app", opts.topics);   // the single tenant owns the initial topics (no reliance on join())
 }
 
-// Publish a sealed payload on a topic (double-base64 over the SDS channel, inside RealNode).
+// Publish a sealed payload on a topic (RealNode double-base64s over SDS; ServiceNode forwards to the service).
 export async function publishSealed(topic: string, sealed: Uint8Array): Promise<void> {
-  await realNode.send(topic, sealed);
+  ensure(); await backend!.send(topic, sealed);
 }
 
 // Add topics after the node is up — via the tenant so the broker records ownership and
 // subscribes the underlying node exactly once per topic (refcounted).
 export async function join(topics: string[]): Promise<void> {
-  if (!realNode.isReady()) return;
-  for (const t of topics) if (!tenant.topics.has(t)) await tenant.subscribe(t);
+  ensure();
+  if (!backend!.isReady()) return;
+  for (const t of topics) if (!tenant!.topics.has(t)) await tenant!.subscribe(t);
 }
 
-export async function stop(): Promise<void> { await realNode.stop(); }
+export async function stop(): Promise<void> { if (backend) await backend.stop(); }
 
 export function storeSync(onCandidates: (topic: string, candidates: Uint8Array[]) => boolean) {
-  return realNode.storeSync(onCandidates);
+  ensure(); return backend!.storeSync(onCandidates);
 }
 
-export function refreshPeerInfo(): Promise<void> { return realNode.refreshPeerInfo(); }
+export function refreshPeerInfo(): Promise<void> { ensure(); return backend!.refreshPeerInfo(); }
