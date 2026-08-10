@@ -25,3 +25,7 @@
 - ServiceNode proxies the shared node peers/mesh (via a new `metrics()` AIDL call) into
   `counters`, so a client using the shared node shows real status + the optimistic
   publish-confirmation works. Service caches metrics natively (pushed by its JS timer).
+
+## 0.6.0
+- Default node mode is now **Edge** (mobile-safe: works on cellular + WiFi, lighter).
+  Core is the opt-in "stable WiFi, relay for the network" mode.

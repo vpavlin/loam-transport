@@ -42,12 +42,13 @@ export function shardFor(contentTopic: string, count = 8): number {
 // % 8 = shard 0). Preset + entryNodes must stay in lockstep with qaku_core (C++ desktop).
 const FLEET_PRESET = "logos.test";
 
-// Kernel operating mode. "Core" = full service node (relays the shard, discovers peers via
-// discv5) — safe default. "Edge" = client-only (filter-subscribe + lightpush-publish, no
-// shard relay, no discovery): lighter on battery/data, leans on the fleet's Core nodes.
-// Read only at node start — call setNodeMode() BEFORE start(), then relaunch to change it.
+// Kernel operating mode. "Edge" = client-only (filter-subscribe + lightpush-publish, no
+// shard relay, no discovery): lighter on battery/data and works on mobile AND WiFi — the
+// safe DEFAULT for phones. "Core" = full service node (relays the shard, discovers peers):
+// best on stable WiFi/power, historically flaky on cellular. Read only at node start —
+// call setNodeMode() BEFORE start(), then relaunch to change it.
 export type NodeMode = "Core" | "Edge";
-let NODE_MODE: NodeMode = "Core";
+let NODE_MODE: NodeMode = "Edge";
 export function setNodeMode(m: NodeMode) { NODE_MODE = m === "Edge" ? "Edge" : "Core"; }
 export function getNodeMode(): NodeMode { return NODE_MODE; }
 
