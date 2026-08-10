@@ -14,13 +14,14 @@ const emitter = Client ? new NativeEventEmitter(Client) : null;
 
 export class ServiceNode implements UnderlyingNode {
   private appId: string;
+  private counters: any;
   private ready = false;
   private route: (topic: string, payload: any) => boolean = () => false;
   private listenerAttached = false;
   readonly joinedTopics = new Set<string>();
   storeInfo = "store: via shared service";
 
-  constructor(opts: { appId: string }) { this.appId = opts.appId; }
+  constructor(opts: { appId: string; counters?: any }) { this.appId = opts.appId; this.counters = opts.counters; }
 
   static available(): boolean { return !!Client; }
   setDeviceId(_id: string) { /* the shared service owns node identity */ }
@@ -72,6 +73,16 @@ export class ServiceNode implements UnderlyingNode {
   async storeSync(_onCandidates: (t: string, c: Uint8Array[]) => boolean): Promise<{ msgs: number; events: number; detail: string }> {
     return { msgs: 0, events: 0, detail: this.storeInfo };
   }
-  async refreshPeerInfo(): Promise<void> { /* proxied metrics: TODO */ }
+  // Pull the shared node's live peers/mesh over AIDL so the app's status + the
+  // optimistic publish-confirmation (which key off counters.mesh) work as on an
+  // embedded node. The service stays a blind pipe — this is only node health.
+  async refreshPeerInfo(): Promise<void> {
+    if (!this.ready || !this.counters || typeof Client.metrics !== "function") return;
+    try {
+      const m = JSON.parse(await Client.metrics());
+      if (typeof m.peers === "number") this.counters.peers = m.peers;
+      if (typeof m.mesh === "number") this.counters.mesh = m.mesh;
+    } catch { /* service down / bad json */ }
+  }
   async stop(): Promise<void> { this.ready = false; try { await Client.disconnect?.(); } catch { /* */ } }
 }

@@ -113,7 +113,7 @@ let tenant: Tenant | null = null;
 function ensure() {
   if (shared) return;
   backend = (preferService && ServiceNode.available())
-    ? new ServiceNode({ appId: clientAppId })
+    ? new ServiceNode({ appId: clientAppId, counters })
     : new RealNode({ counters, diag, payloadCandidates, entryNodes: ENTRY_NODES, buildConfig,
         SETTLE_MS, FILTER_RENEW_MS, STORE_PAGE, STORE_TIMEOUT_MS, STORE_MAX_PAGES });
   shared = new SharedDeliveryNode(backend);

@@ -20,3 +20,8 @@
 - `ServiceNode` (AIDL-client UnderlyingNode) + lazy backend selection: `preferServiceBackend(true, appId)`
   makes a client route through the device-wide Logos Delivery service; default stays RealNode.
   Fixed the tenant/adopt id mismatch (now consistently "app").
+
+## 0.5.0
+- ServiceNode proxies the shared node peers/mesh (via a new `metrics()` AIDL call) into
+  `counters`, so a client using the shared node shows real status + the optimistic
+  publish-confirmation works. Service caches metrics natively (pushed by its JS timer).
