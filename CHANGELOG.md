@@ -40,3 +40,9 @@
 ## 0.7.1
 - Import sha256 from `@noble/hashes/sha2` (works across @noble 1.4+ AND 2.x) instead of the
   removed `/sha256` subpath — so consumers on any recent @noble version build.
+
+## 0.7.2
+- Fallback: if the shared service is selected but not bindable (Logos Delivery not
+  installed), start() falls back to an embedded node instead of throwing.
+- Expose usingServiceBackend()/serviceNodeDown()/launchSharedService() so an app can show a
+  "Logos Delivery not running — Open" prompt.

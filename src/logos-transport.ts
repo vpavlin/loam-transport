@@ -111,18 +111,26 @@ export function preferServiceBackend(on: boolean, appId?: string) { preferServic
 let backend: RealNode | ServiceNode | null = null;
 let shared: SharedDeliveryNode | null = null;
 let tenant: Tenant | null = null;
-function ensure() {
-  if (shared) return;
-  backend = (preferService && ServiceNode.available())
-    ? new ServiceNode({ appId: clientAppId, counters })
-    : new RealNode({ counters, diag, payloadCandidates, entryNodes: ENTRY_NODES, buildConfig,
-        SETTLE_MS, FILTER_RENEW_MS, STORE_PAGE, STORE_TIMEOUT_MS, STORE_MAX_PAGES });
+function makeReal(): RealNode {
+  return new RealNode({ counters, diag, payloadCandidates, entryNodes: ENTRY_NODES, buildConfig,
+    SETTLE_MS, FILTER_RENEW_MS, STORE_PAGE, STORE_TIMEOUT_MS, STORE_MAX_PAGES });
+}
+function wire(b: RealNode | ServiceNode) {
+  backend = b;
   shared = new SharedDeliveryNode(backend);
   // the app's single tenant opens (decrypts) via onReceive and reports back.
   tenant = shared.registerTenant("app").onMessage(
     (topic: string, cands: Uint8Array[]) => (onReceiveCb ? onReceiveCb(topic, cands) : false),
   );
 }
+function ensure() {
+  if (shared) return;
+  wire((preferService && ServiceNode.available()) ? new ServiceNode({ appId: clientAppId, counters }) : makeReal());
+}
+
+export function usingServiceBackend(): boolean { return backend instanceof ServiceNode; }
+export function serviceNodeDown(): boolean { return backend instanceof ServiceNode ? backend.isNodeDown() : false; }
+export function launchSharedService(): void { if (backend instanceof ServiceNode) backend.launchService(); }
 
 export function deliveryAvailable(): boolean { return RealNode.available() || ServiceNode.available(); }
 export function getStoreInfo(): string { return backend ? backend.storeInfo : ""; }
@@ -150,7 +158,18 @@ export async function start(opts: { deviceId: string; topics: string[]; onReceiv
   onReceiveCb = opts.onReceive;
   ensure();
   backend!.setDeviceId(opts.deviceId);
-  await backend!.start(opts.topics, opts.onStatus);
+  try {
+    await backend!.start(opts.topics, opts.onStatus);
+  } catch (e) {
+    // Shared service selected but not bindable (Logos Delivery not installed) → fall back
+    // to an embedded node so the app still works standalone.
+    if (backend instanceof ServiceNode) {
+      try { opts.onStatus && opts.onStatus("Shared node unavailable — using own node"); } catch { /* */ }
+      wire(makeReal());
+      backend!.setDeviceId(opts.deviceId);
+      await backend!.start(opts.topics, opts.onStatus);
+    } else { throw e; }
+  }
   shared!._adopt("app", opts.topics);   // the single tenant owns the initial topics (no reliance on join())
 }
 
