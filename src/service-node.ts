@@ -20,6 +20,7 @@ export class ServiceNode implements UnderlyingNode {
   private listenerAttached = false;
   private reconnectTimer: any = null;
   nodeDown = false;   // bound, but the service app's node/JS isn't running (no metrics)
+  awaitingApproval = false;   // bound + node up, but this app hasn't been approved by the owner
   readonly joinedTopics = new Set<string>();
   storeInfo = "store: via shared service";
 
@@ -99,10 +100,16 @@ export class ServiceNode implements UnderlyingNode {
     if (!this.ready || !this.counters || typeof Client.metrics !== "function") return;
     try {
       const m = JSON.parse(await Client.metrics());
+      if (m.authorized === false) {   // gated: not approved yet — reveal no health
+        this.awaitingApproval = true; this.nodeDown = false;
+        this.counters.peers = -1; this.counters.mesh = -1; return;
+      }
+      this.awaitingApproval = false;
       this.nodeDown = typeof m.peers !== "number";   // bound but node/JS not reporting
       if (typeof m.peers === "number") this.counters.peers = m.peers;
       if (typeof m.mesh === "number") this.counters.mesh = m.mesh;
     } catch { this.nodeDown = true; }
   }
+  isAwaitingApproval(): boolean { return this.awaitingApproval; }
   async stop(): Promise<void> { this.ready = false; try { await Client.disconnect?.(); } catch { /* */ } }
 }

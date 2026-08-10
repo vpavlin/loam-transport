@@ -130,6 +130,7 @@ function ensure() {
 
 export function usingServiceBackend(): boolean { return backend instanceof ServiceNode; }
 export function serviceNodeDown(): boolean { return backend instanceof ServiceNode ? backend.isNodeDown() : false; }
+export function serviceAwaitingApproval(): boolean { return backend instanceof ServiceNode ? backend.isAwaitingApproval() : false; }
 export function launchSharedService(): void { if (backend instanceof ServiceNode) backend.launchService(); }
 
 export function deliveryAvailable(): boolean { return RealNode.available() || ServiceNode.available(); }

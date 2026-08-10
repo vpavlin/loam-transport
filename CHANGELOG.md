@@ -46,3 +46,8 @@
   installed), start() falls back to an embedded node instead of throwing.
 - Expose usingServiceBackend()/serviceNodeDown()/launchSharedService() so an app can show a
   "Logos Delivery not running — Open" prompt.
+
+## 0.8.0
+- Health/metrics gated behind approval: an unapproved client gets {authorized:false} (no
+  peers/mesh) and its read re-surfaces the "Allow?" request. ServiceNode exposes
+  isAwaitingApproval()/serviceAwaitingApproval() so the app shows "waiting for approval".
