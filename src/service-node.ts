@@ -18,6 +18,8 @@ export class ServiceNode implements UnderlyingNode {
   private ready = false;
   private route: (topic: string, payload: any) => boolean = () => false;
   private listenerAttached = false;
+  private reconnectTimer: any = null;
+  nodeDown = false;   // bound, but the service app's node/JS isn't running (no metrics)
   readonly joinedTopics = new Set<string>();
   storeInfo = "store: via shared service";
 
@@ -43,7 +45,24 @@ export class ServiceNode implements UnderlyingNode {
         this.route(topic, cands);
       } catch { /* never throw in the listener */ }
     });
+    // Reconnect lifecycle: when the service is updated/killed and comes back, re-subscribe
+    // our topics (the owner's grant persists, so no re-prompt). While it's gone, keep rebinding.
+    emitter.addListener("logosDeliveryConnected", () => {
+      for (const t of this.joinedTopics) { try { Client.subscribe(t); } catch { /* */ } }
+      this.ready = true; this.nodeDown = false;
+      if (this.reconnectTimer) { clearInterval(this.reconnectTimer); this.reconnectTimer = null; }
+    });
+    emitter.addListener("logosDeliveryDisconnected", () => {
+      this.ready = false;
+      if (!this.reconnectTimer) this.reconnectTimer = setInterval(() => { try { Client.reconnect(); } catch { /* */ } }, 3000);
+    });
   }
+
+  // The service app is installed but its node/JS isn't running (bound, but no metrics).
+  isNodeDown(): boolean { return this.nodeDown; }
+  // Bring the Logos Delivery app to the foreground so its node starts (call from foreground).
+  launchService(): void { try { Client.launchService && Client.launchService(); } catch { /* */ } }
+  async serviceInstalled(): Promise<boolean> { try { return await Client.isInstalled(); } catch { return false; } }
 
   async start(initialTopics: string[], onStatus?: (s: string) => void): Promise<void> {
     if (!Client) throw new Error("LogosDeliveryClient native module not present");
@@ -80,9 +99,10 @@ export class ServiceNode implements UnderlyingNode {
     if (!this.ready || !this.counters || typeof Client.metrics !== "function") return;
     try {
       const m = JSON.parse(await Client.metrics());
+      this.nodeDown = typeof m.peers !== "number";   // bound but node/JS not reporting
       if (typeof m.peers === "number") this.counters.peers = m.peers;
       if (typeof m.mesh === "number") this.counters.mesh = m.mesh;
-    } catch { /* service down / bad json */ }
+    } catch { this.nodeDown = true; }
   }
   async stop(): Promise<void> { this.ready = false; try { await Client.disconnect?.(); } catch { /* */ } }
 }

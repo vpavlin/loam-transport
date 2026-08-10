@@ -29,3 +29,10 @@
 ## 0.6.0
 - Default node mode is now **Edge** (mobile-safe: works on cellular + WiFi, lighter).
   Core is the opt-in "stable WiFi, relay for the network" mode.
+
+## 0.7.0
+- Client is now an SDK: the AIDL + bind module + `withDeliveryClient` plugin ship IN the
+  package (native/deliveryclient + plugins/), resolving native from the package itself. A
+  consuming app just enables the plugin + calls preferServiceBackend() — no vendored files.
+- ServiceNode gains reconnect (re-bind + re-register + re-subscribe on service restart, grant
+  persists so no re-prompt), node-down detection, and launchService().
