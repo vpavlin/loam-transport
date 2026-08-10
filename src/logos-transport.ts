@@ -1,20 +1,16 @@
-// logos-transport — SHARED, crypto-agnostic transport over liblogosdelivery + SDS
-// Reliable Channels. This is a 1:1 MIRROR of KYM's proven mobile transport
-// (kym/mobile/src/lib/delivery.ts) with EXACTLY ONE intended change: it is
-// crypto-agnostic. It moves OPAQUE sealed bytes on content topics — on receive it
-// hands the app the candidate sealed-byte arrays and the app opens one with its key
-// (KYM opened inline against its budget keys; here the app does that via onReceive).
-// Everything else — node config, the bring-up ORDER (join BEFORE settle), the
-// double-base64 channelSend, payloadCandidates, the receive-event parse, the 60s
-// content-topic renew, storeSync, getPeerInfo — matches KYM byte-for-byte so this
-// file can eventually REPLACE KYM's transport. Do not reorder or paraphrase it.
-import { NativeModules, NativeEventEmitter } from "react-native";
+// logos-transport — the app's transport API, now running over the multi-tenant broker
+// seam (SharedDeliveryNode + RealNode). The PUBLIC API is byte-for-byte the same as the
+// KYM-mirror transport it replaces, so sessions.ts / App.tsx are unchanged. What moved:
+// the one liblogosdelivery node now lives behind an UnderlyingNode (RealNode), and
+// receives are demuxed by content topic through the broker to this app's single tenant.
+// Swapping RealNode for a device-wide shared-delivery service later is the only change.
+// The proven bring-up (join-before-settle), the listener, storeSync and the double-base64
+// send were moved into RealNode VERBATIM — see real-node.ts. This file is the public shim.
 import { fromByteArray, toByteArray } from "base64-js";
 import { sha256 as sha256hash } from "@noble/hashes/sha256";
 import { utf8Bytes as utf8, utf8Decode as fromUtf8 } from "./utf8";
-
-const { LogosMessaging } = NativeModules as any;
-const emitter = LogosMessaging ? new NativeEventEmitter(LogosMessaging) : null;
+import { SharedDeliveryNode } from "./broker";
+import { RealNode } from "./real-node";
 
 // Per-stage diagnostic counters (surface in a Sync card). rxOpened/rxOpenFail are the
 // app's open() outcome, reported back via onReceive's return value.
@@ -37,42 +33,50 @@ export function shardFor(contentTopic: string, count = 8): number {
   return Number(val % BigInt(count));
 }
 
-// logos.dev fleet bootstrap multiaddrs — KYM's BOOTSTRAP, pinned so the node meshes.
+// FLEET — logos.test (Logos Test Network, cluster 2, 8 shards). We were on logos.dev,
+// but logos.dev migrated to CLUSTER 3: the preset baked into liblogosdelivery still maps
+// logos.dev→cluster 2, so a fresh node dials the (now cluster-3) logos.dev boxes with
+// cluster-2 config and never meshes — "existing connections persist, new ones fail".
+// logos.test stays on cluster 2, which keeps qaku's shard math valid (sha256("qaku"+"1")
+// % 8 = shard 0). Preset + entryNodes must stay in lockstep with qaku_core (C++ desktop).
+const FLEET_PRESET = "logos.test";
+
+// Kernel operating mode. "Core" = full service node (relays the shard, discovers peers via
+// discv5) — safe default. "Edge" = client-only (filter-subscribe + lightpush-publish, no
+// shard relay, no discovery): lighter on battery/data, leans on the fleet's Core nodes.
+// Read only at node start — call setNodeMode() BEFORE start(), then relaunch to change it.
+export type NodeMode = "Core" | "Edge";
+let NODE_MODE: NodeMode = "Core";
+export function setNodeMode(m: NodeMode) { NODE_MODE = m === "Edge" ? "Edge" : "Core"; }
+export function getNodeMode(): NodeMode { return NODE_MODE; }
+
 export const ENTRY_NODES: string[] = [
-  "/dns4/delivery-01.do-ams3.logos.dev.status.im/tcp/30303/p2p/16Uiu2HAmTUbnxLGT9JvV6mu9oPyDjqHK4Phs1VDJNUgESgNSkuby",
-  "/dns4/delivery-02.do-ams3.logos.dev.status.im/tcp/30303/p2p/16Uiu2HAmMK7PYygBtKUQ8EHp7EfaD3bCEsJrkFooK8RQ2PVpJprH",
-  "/dns4/delivery-01.gc-us-central1-a.logos.dev.status.im/tcp/30303/p2p/16Uiu2HAm4S1JYkuzDKLKQvwgAhZKs9otxXqt8SCGtB4hoJP1S397",
-  "/dns4/delivery-02.gc-us-central1-a.logos.dev.status.im/tcp/30303/p2p/16Uiu2HAm8Y9kgBNtjxvCnf1X6gnZJW5EGE4UwwCL3CCm55TwqBiH",
-  "/dns4/delivery-01.ac-cn-hongkong-c.logos.dev.status.im/tcp/30303/p2p/16Uiu2HAm8YokiNun9BkeA1ZRmhLbtNUvcwRr64F69tYj9fkGyuEP",
-  "/dns4/delivery-02.ac-cn-hongkong-c.logos.dev.status.im/tcp/30303/p2p/16Uiu2HAkvwhGHKNry6LACrB8TmEFoCJKEX29XR5dDUzk3UT3UNSE",
+  "/dns4/node-01.do-ams3.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmQ9X2xDfPG3uL77V9piYDhjq14JhKCtcmNYsTMKNqrKCj",
+  "/dns4/node-02.do-ams3.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmB8NYprrfQrgWVzsJtYWkfjsXbmJEGNMG6othXsQ53BwG",
+  "/dns4/node-01.gc-us-central1-a.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmF8WtwGPmeGHgYAX2277jHgy5cW9F7zsB8EqUjBZQAZQ3",
+  "/dns4/node-02.gc-us-central1-a.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmUuXhUW9bdJpzN1kfDziFiUZo4bszTk66cvr7uuyCHXR7",
+  "/dns4/node-01.ac-cn-hongkong-c.logos.test.status.im/tcp/30303/p2p/16Uiu2HAmL3oU95jh1BZHozn3uNhx8HEneirgr8M1jEAapzXGDqRF",
+  "/dns4/node-02.ac-cn-hongkong-c.logos.test.status.im/tcp/30303/p2p/16Uiu2HAm28CoBZjpyxsanC8tQpbvZ7bZJnVYuB1EgFzb571qpWsV",
 ];
-const FLEET_PRESET = "logos.dev";
 const SETTLE_MS = 10000;         // KYM SETTLE_MS
 const FILTER_RENEW_MS = 60000;   // KYM FILTER_RENEW_MS
 const STORE_PAGE = 100;          // KYM STORE_PAGE
 const STORE_TIMEOUT_MS = 20000;  // KYM STORE_TIMEOUT_MS
 const STORE_MAX_PAGES = 25;      // KYM STORE_MAX_PAGES (25*100 = 2500 events/topic)
-let storeInfo = "";
-
-export function deliveryAvailable(): boolean { return !!LogosMessaging; }
-export function getStoreInfo(): string { return storeInfo; }
-
-let didSetup = false;
-let node: { ctx: string } | null = null;             // set AFTER settle, like KYM
-let starting: Promise<{ ctx: string }> | null = null;
-let listenerAttached = false;
-let renewTimer: ReturnType<typeof setInterval> | null = null;
-let deviceId = "";
-let onReceiveCb: OnReceive | null = null;
-const joinedTopics = new Set<string>();              // KYM `routes`
-let storeReqSeq = 0;
 
 export type OnReceive = (topic: string, candidates: Uint8Array[]) => boolean; // true iff app opened one
 export type OnStatus = (s: string) => void;
 
-export function getCtx(): string { return node ? node.ctx : ""; }
+// Edge drops relay + discv5 (it neither serves the shard nor discovers peers); it publishes
+// via lightpush and receives via filter, leaning on the fleet's Core nodes. Core is the
+// proven RELAY config — no light-client fields (they make waku_new reject → offline).
+function buildConfig(): any {
+  return NODE_MODE === "Edge"
+    ? { mode: "Edge", preset: FLEET_PRESET, entryNodes: ENTRY_NODES, tcpPort: 0 }
+    : { mode: "Core", preset: FLEET_PRESET, relay: true, entryNodes: ENTRY_NODES, tcpPort: 0, discv5Discovery: true };
+}
 
-// KYM payloadCandidates — verbatim.
+// KYM payloadCandidates — verbatim. Passed into RealNode so its listener/store stay pure.
 export function payloadCandidates(payload: any): Uint8Array[] {
   const out: Uint8Array[] = [];
   if (Array.isArray(payload)) {
@@ -92,188 +96,48 @@ export function payloadCandidates(payload: any): Uint8Array[] {
   return out;
 }
 
-// KYM joinRoute — subscribe THEN channelCreate. Uses the local ctx during bring-up.
-async function joinRoute(ctx: string, topic: string): Promise<void> {
-  await LogosMessaging.subscribeContentTopic(ctx, topic);
-  await LogosMessaging.channelCreate(ctx, topic, topic, deviceId);
-  joinedTopics.add(topic);
-}
+// ---- the one node, behind the broker seam ----
+let onReceiveCb: OnReceive | null = null;
+const realNode = new RealNode({
+  counters, diag, payloadCandidates, entryNodes: ENTRY_NODES, buildConfig,
+  SETTLE_MS, FILTER_RENEW_MS, STORE_PAGE, STORE_TIMEOUT_MS, STORE_MAX_PAGES,
+});
+const shared = new SharedDeliveryNode(realNode);
+// qaku is a single tenant today; the tenant callback opens (decrypts) via the app's
+// onReceive and reports back whether it opened, which drives the rx counters in RealNode.
+const tenant = shared.registerTenant("app").onMessage(
+  (topic: string, cands: Uint8Array[]) => (onReceiveCb ? onReceiveCb(topic, cands) : false),
+);
 
-// KYM startReceiving — register the ONE listener. Gated on `node` (set after settle),
-// exactly like KYM, so messages during the settle window are dropped. Crypto-agnostic:
-// hands candidates to the app instead of opening inline.
-function attachListener(): void {
-  if (listenerAttached || !emitter) return;
-  listenerAttached = true;
-  emitter.addListener("logosMessage", (evt: { wakuPtr?: string; event?: string }) => {
-    counters.rxRaw++;
-    try {
-      const s0 = String((evt && evt.event) || "");
-      if (s0.indexOf("channel_message_received") >= 0) diag.chan++;
-      else if (s0.indexOf("message_received") >= 0) diag.msg++;
-      else if (s0.indexOf("error") >= 0) diag.err++;
-    } catch { /* */ }
-    if (!node) return; // node not up yet — nothing to hand the app (KYM: `if (!node) return`)
-    try {
-      const raw = evt && evt.event;
-      if (!raw) { counters.rxNoPayload++; return; }
-      const m: any = JSON.parse(raw);
-      const wm = m.wakuMessage || m.message || m;
-      const payload = wm && wm.payload != null ? wm.payload : m.payload;
-      if (payload == null) { counters.rxNoPayload++; return; }
-      counters.rxSeen++;
-      const topic = m.contentTopic || m.channelId || (wm && wm.contentTopic) || "";
-      const cands = payloadCandidates(payload);
-      const opened = onReceiveCb ? onReceiveCb(topic, cands) : false;
-      if (opened) { counters.rxOpened++; return; }
-      counters.rxOpenFail++;
-      if (!diag.sample) {
-        const kind = Array.isArray(payload) ? "arr" + payload.length
-          : typeof payload === "string" ? "b64:" + payload.length : typeof payload;
-        const isChan = m && m.eventType === "channel_message_received";
-        diag.sample = `${isChan ? "chan" : "msg"} pl=${kind} cand=${cands.length}`;
-      }
-    } catch { /* foreign traffic / bad shape — never throw in the listener */ }
-  });
-}
+export function deliveryAvailable(): boolean { return RealNode.available(); }
+export function getStoreInfo(): string { return realNode.storeInfo; }
+export function getCtx(): string { return realNode.getCtx(); }
 
-// KYM ensureNode — EXACT order: setup → new → start → joinRoute(subscribe+channelCreate)
-// for every topic → settle → renew. Idempotent; concurrent callers share the in-flight
-// startup. Adding a topic once the node is up joins it immediately (KYM refreshRoutes).
+// Bring the node up (or, if up, join new topics), then record topic ownership so the
+// broker routes those topics to this app's tenant.
 export async function start(opts: { deviceId: string; topics: string[]; onReceive: OnReceive; onStatus?: OnStatus }): Promise<void> {
-  if (!LogosMessaging) throw new Error("Logos Delivery native module not present in this build");
   onReceiveCb = opts.onReceive;
-  deviceId = opts.deviceId;
-  const step = (s: string) => { try { opts.onStatus && opts.onStatus(s); } catch { /* */ } };
-  attachListener(); // like KYM's startReceiving — registered independently of node bring-up
-  if (node) { for (const t of opts.topics) if (!joinedTopics.has(t)) await joinRoute(node.ctx, t); return; }
-  if (starting) { await starting; for (const t of opts.topics) if (!joinedTopics.has(t)) await joinRoute(node!.ctx, t); return; }
-  starting = (async () => {
-    step("Starting node…");
-    if (!didSetup) { await LogosMessaging.setup(); didSetup = true; }
-    // KYM's RELAY config — no light-client fields (they make waku_new reject → offline).
-    // tcpPort:0 → OS-assigned free port; discv5Discovery:false → no fixed discv5 UDP
-    // port. Both let a SECOND liblogosdelivery node (the other app) run on the same
-    // device without a port collision. entryNodes are pinned so discovery isn't needed;
-    // proven to still mesh (desktop 2-node test: 36/36 with discv5 off).
-    const config = { mode: "Core", preset: FLEET_PRESET, relay: true, entryNodes: ENTRY_NODES, tcpPort: 0, discv5Discovery: false };
-    const c: string = await LogosMessaging.new(config);
-    step("Joining mesh…");
-    await LogosMessaging.start(c);
-    // Subscribe + channelCreate every topic BEFORE the settle, so the mesh forms with
-    // the channel/subscription already wired in (KYM's order — the bit I'd gotten wrong).
-    for (const t of opts.topics) await joinRoute(c, t);
-    step("Forming mesh…");
-    await new Promise((r) => setTimeout(r, SETTLE_MS)); // settle AFTER join
-    const n = { ctx: c };
-    node = n; // only now does the listener start processing (matches KYM)
-    if (renewTimer) clearInterval(renewTimer);
-    renewTimer = setInterval(() => {
-      if (!node) return;
-      for (const t of joinedTopics) LogosMessaging.subscribeContentTopic(node.ctx, t).catch(() => { /* next tick retries */ });
-    }, FILTER_RENEW_MS);
-    step("Connected");
-    return n;
-  })();
-  try { await starting; } catch (e) { node = null; throw e; } finally { starting = null; }
+  realNode.setDeviceId(opts.deviceId);
+  await realNode.start(opts.topics, opts.onStatus);
+  shared._adopt("qaku", opts.topics);
 }
 
-// KYM publishSealed (channel branch) — DOUBLE-base64 over the SDS reliable channel.
+// Publish a sealed payload on a topic (double-base64 over the SDS channel, inside RealNode).
 export async function publishSealed(topic: string, sealed: Uint8Array): Promise<void> {
-  counters.txAttempt++;
-  if (!node) { diag.txErr = "node-null"; return; }
-  const sealedB64 = fromByteArray(sealed);
-  const doubled = fromByteArray(utf8(sealedB64));
-  try {
-    await LogosMessaging.channelSend(node.ctx, topic, JSON.stringify({ payload: doubled, ephemeral: false }));
-    counters.txTotal++;
-  } catch (e: any) {
-    counters.txFail++;
-    diag.txErr = String((e && (e.message || e.code)) || e).slice(0, 140);
-    throw e;
-  }
+  await realNode.send(topic, sealed);
 }
 
-// Add topics after the node is up (KYM refreshRoutes) — subscribe+channelCreate each.
+// Add topics after the node is up — via the tenant so the broker records ownership and
+// subscribes the underlying node exactly once per topic (refcounted).
 export async function join(topics: string[]): Promise<void> {
-  if (!node) return;
-  for (const t of topics) if (!joinedTopics.has(t)) await joinRoute(node.ctx, t);
+  if (!realNode.isReady()) return;
+  for (const t of topics) if (!tenant.topics.has(t)) await tenant.subscribe(t);
 }
 
-// Stop the node (KYM stopNode) — best-effort; keeps didSetup so a restart is cheap.
-export async function stop(): Promise<void> {
-  if (renewTimer) { clearInterval(renewTimer); renewTimer = null; }
-  joinedTopics.clear();
-  if (node && LogosMessaging) {
-    const c = node.ctx;
-    node = null;
-    try { await LogosMessaging.stop(c); } catch { /* ignore */ }
-  }
+export async function stop(): Promise<void> { await realNode.stop(); }
+
+export function storeSync(onCandidates: (topic: string, candidates: Uint8Array[]) => boolean) {
+  return realNode.storeSync(onCandidates);
 }
 
-// KYM storeSync — cursor-paged history pull over EVERY joined topic. Hands each stored
-// message's candidates to the app (which opens+folds) and returns {msgs, events, detail}.
-export async function storeSync(onCandidates: (topic: string, candidates: Uint8Array[]) => boolean): Promise<{ msgs: number; events: number; detail: string }> {
-  if (!node || typeof LogosMessaging.storeQuery !== "function") {
-    storeInfo = "store: bridge missing (rebuild app)";
-    return { msgs: 0, events: 0, detail: storeInfo };
-  }
-  const ctx = node.ctx;
-  let totalMsgs = 0, totalEvents = 0;
-  const parts: string[] = [];
-  for (const topic of joinedTopics) {
-    const label = topic.slice(7, 15); // short hex of the content topic
-    let cursor: any = undefined;
-    let topicMsgs = 0, topicEvents = 0, note = "";
-    for (let page = 0; page < STORE_MAX_PAGES; page++) {
-      const query: any = {
-        requestId: `lt-${storeReqSeq++}-${page}`, // MANDATORY — omitting it faults the FFI
-        contentTopics: [topic], includeData: true, paginationForward: true, paginationLimit: STORE_PAGE,
-      };
-      if (cursor) query.paginationCursor = cursor;
-      let respStr: string | null = null;
-      for (const peer of ENTRY_NODES) { // ask each fleet node until one answers this page
-        try { respStr = await LogosMessaging.storeQuery(ctx, JSON.stringify(query), peer, STORE_TIMEOUT_MS); if (respStr) break; }
-        catch { respStr = null; }
-      }
-      if (!respStr) { note = "no store peer answered"; break; }
-      if (respStr.indexOf("{") !== 0) { note = respStr.slice(0, 40); break; } // "on_response-ok" sentinel = empty
-      let resp: any;
-      try { resp = JSON.parse(respStr); } catch { note = `bad json: ${respStr.slice(0, 30)}`; break; }
-      const msgs: any[] = resp.messages || resp.Messages || resp.messageData || [];
-      topicMsgs += msgs.length;
-      for (const entry of msgs) {
-        const wm = entry.message || entry.wakuMessage || entry;
-        const payload = wm && wm.payload != null ? wm.payload : entry.payload;
-        if (payload == null) continue;
-        if (onCandidates(topic, payloadCandidates(payload))) topicEvents++;
-      }
-      cursor = resp.paginationCursor ?? resp.pagination_cursor ?? resp.cursor;
-      if (!cursor || msgs.length === 0) break; // last page
-    }
-    totalMsgs += topicMsgs; totalEvents += topicEvents;
-    parts.push(`${label}:${topicMsgs}m/${topicEvents}e${note ? `(${note})` : ""}`);
-  }
-  storeInfo = `store: ${totalMsgs} msg → ${totalEvents} ev  [${parts.join("  ")}]`;
-  return { msgs: totalMsgs, events: totalEvents, detail: storeInfo };
-}
-
-// KYM getPeerCount — sum ALL gossipsub-mesh gauges, parse shard(s), report peers/mesh.
-export async function refreshPeerInfo(): Promise<void> {
-  if (!node || typeof LogosMessaging.getNodeInfo !== "function") return;
-  try {
-    const metrics: string = await LogosMessaging.getNodeInfo(node.ctx, "Metrics");
-    if (typeof metrics !== "string" || !metrics) return;
-    let peers = -1, mesh = 0;
-    for (const raw of metrics.split("\n")) {
-      const line = raw.trim();
-      if (!line || line.startsWith("#")) continue;
-      const value = Number(line.slice(line.lastIndexOf(" ") + 1));
-      if (!Number.isFinite(value)) continue;
-      if (line.startsWith("libp2p_peers ")) peers = Math.trunc(value);
-      else if (line.includes("gossipsub") && line.includes("mesh")) mesh += Math.trunc(value);
-    }
-    if (peers >= 0) counters.peers = peers;
-    counters.mesh = mesh;
-  } catch { /* node down / metrics unavailable */ }
-}
+export function refreshPeerInfo(): Promise<void> { return realNode.refreshPeerInfo(); }
