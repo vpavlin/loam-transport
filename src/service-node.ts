@@ -15,6 +15,7 @@ const emitter = Client ? new NativeEventEmitter(Client) : null;
 export class ServiceNode implements UnderlyingNode {
   private appId: string;
   private counters: any;
+  private diag: any;
   private ready = false;
   private route: (topic: string, payload: any) => boolean = () => false;
   private listenerAttached = false;
@@ -24,7 +25,7 @@ export class ServiceNode implements UnderlyingNode {
   readonly joinedTopics = new Set<string>();
   storeInfo = "store: via shared service";
 
-  constructor(opts: { appId: string; counters?: any }) { this.appId = opts.appId; this.counters = opts.counters; }
+  constructor(opts: { appId: string; counters?: any; diag?: any }) { this.appId = opts.appId; this.counters = opts.counters; this.diag = opts.diag; }
 
   static available(): boolean { return !!Client; }
   setDeviceId(_id: string) { /* the shared service owns node identity */ }
@@ -41,6 +42,7 @@ export class ServiceNode implements UnderlyingNode {
       try {
         if (!this.ready) return;
         const topic = m.topic || "";
+        if (this.counters) this.counters.rxRaw = (this.counters.rxRaw || 0) + 1;
         const arr: string[] = m.candidatesJson ? JSON.parse(m.candidatesJson) : [];
         const cands = arr.map((b64) => toByteArray(b64));
         this.route(topic, cands);
@@ -85,8 +87,17 @@ export class ServiceNode implements UnderlyingNode {
   async unsubscribe(_topic: string): Promise<void> { /* service-side; no per-topic unsub yet */ }
 
   async send(topic: string, sealed: Uint8Array): Promise<void> {
-    if (!this.ready) throw new Error("node-null");
-    await Client.send(topic, fromByteArray(sealed));
+    if (!this.ready) { if (this.diag) this.diag.txErr = "node-null"; throw new Error("node-null"); }
+    if (this.counters) this.counters.txAttempt = (this.counters.txAttempt || 0) + 1;
+    try {
+      await Client.send(topic, fromByteArray(sealed));
+      if (this.counters) this.counters.txTotal = (this.counters.txTotal || 0) + 1;
+      if (this.diag) this.diag.txErr = "";
+    } catch (e: any) {
+      if (this.counters) this.counters.txFail = (this.counters.txFail || 0) + 1;
+      if (this.diag) this.diag.txErr = String((e && (e.message || e.code)) || e).slice(0, 140);
+      throw e;
+    }
   }
 
   // Store history + live peer metrics belong to the service's node; not proxied yet.

@@ -125,7 +125,15 @@ function wire(b: RealNode | ServiceNode) {
 }
 function ensure() {
   if (shared) return;
-  wire((preferService && ServiceNode.available()) ? new ServiceNode({ appId: clientAppId, counters }) : makeReal());
+  wire((preferService && ServiceNode.available()) ? new ServiceNode({ appId: clientAppId, counters, diag }) : makeReal());
+}
+
+// Refresh live node health (peers/mesh) — on the ServiceNode path this pulls the
+// shared node's metrics over AIDL. Call from a debug/status poll; no-op on RealNode
+// (its counters update on receive). Lets a Debug panel show real peers/mesh instead of -1.
+export function refreshDebug(): Promise<void> {
+  const b = backend as any;
+  return b && typeof b.refreshPeerInfo === "function" ? b.refreshPeerInfo() : Promise.resolve();
 }
 
 export function usingServiceBackend(): boolean { return backend instanceof ServiceNode; }
