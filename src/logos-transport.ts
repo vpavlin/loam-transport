@@ -12,6 +12,8 @@ import { utf8Bytes as utf8, utf8Decode as fromUtf8 } from "./utf8";
 import { SharedDeliveryNode, Tenant } from "./broker";
 import { RealNode } from "./real-node";
 import { ServiceNode } from "./service-node";
+import { BleMeshBearer, makeFrame } from "./bearer";
+import type { MeshRadio } from "./bearer";
 
 // Per-stage diagnostic counters (surface in a Sync card). rxOpened/rxOpenFail are the
 // app's open() outcome, reported back via onReceive's return value.
@@ -216,9 +218,38 @@ export async function start(opts: { deviceId: string; topics: string[]; onReceiv
 }
 
 // Publish a sealed payload on a topic (RealNode double-base64s over SDS; ServiceNode forwards to the service).
+// When the BLE mesh bearer is armed, ALSO flood the same sealed bytes to nearby peers — the
+// event log doesn't care which bearer carried a write, and dedup is by event id.
 export async function publishSealed(topic: string, sealed: Uint8Array): Promise<void> {
-  ensure(); await backend!.send(topic, sealed);
+  ensure();
+  await backend!.send(topic, sealed);
+  if (mesh) { try { await mesh.send(makeFrame(topic, sealed)); } catch { /* mesh is best-effort */ } }
 }
+
+// ---- BLE mesh bearer (ADR 0012), opt-in ----
+// A second bearer beside Waku. The APP supplies the native radio (MeshRadio); this module
+// owns the portable gossip. Sends are fanned in publishSealed(); received frames are
+// funneled into the SAME broker route as Waku (topic-owned tenants open the sealed bytes),
+// so BLE traffic reaches the app through the exact path Waku traffic does — the sync layer
+// dedups by event id, so a message seen on both bearers is idempotent.
+let mesh: BleMeshBearer | null = null;
+export async function enableMesh(radio: MeshRadio, opts?: { ttl?: number }): Promise<void> {
+  if (mesh) return;
+  ensure();
+  const m = new BleMeshBearer(radio, opts);
+  m.onReceive((f) => {
+    counters.rxRaw++;
+    // Funnel a BLE frame into the broker exactly like a Waku receive: the sealed bytes are
+    // a single decode candidate for whichever tenant owns the topic.
+    const opened = shared ? shared._route(f.topic, [f.payload]) : false;
+    if (opened) counters.rxNew++; else counters.rxDup++;
+  });
+  await m.start();
+  mesh = m;
+}
+export async function disableMesh(): Promise<void> { const m = mesh; mesh = null; if (m) await m.stop(); }
+export function meshEnabled(): boolean { return mesh !== null; }
+export function meshPeers(): number { return mesh ? mesh.reachablePeers() : 0; }
 
 // Add topics after the node is up — via the tenant so the broker records ownership and
 // subscribes the underlying node exactly once per topic (refcounted).
