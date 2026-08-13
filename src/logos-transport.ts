@@ -171,6 +171,16 @@ export function registerClient(
   else tenant.onMessage(onMessage);
   return tenant;
 }
+// Toggle a client's offline caching live (the shared-delivery consent UI calls this).
+// 0 disables; a positive limit enables. Any already-buffered messages still drain.
+export function setClientCache(appId: string, cacheLimit: number): void {
+  ensure(); const t = shared!.tenants.get(appId); if (t) t.cacheLimit = cacheLimit;
+}
+// Read a client's cache state for display: its limit + how many are buffered now.
+export function clientCacheInfo(appId: string): { cacheLimit: number; buffered: number } {
+  ensure(); const t = shared!.tenants.get(appId);
+  return t ? { cacheLimit: t.cacheLimit, buffered: t.buffered() } : { cacheLimit: 0, buffered: 0 };
+}
 export function clientSubscribe(appId: string, topic: string): Promise<void> {
   ensure(); const t = shared!.tenants.get(appId); return t ? t.subscribe(topic) : Promise.resolve();
 }

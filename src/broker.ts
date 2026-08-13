@@ -115,6 +115,10 @@ export class Tenant {
   // still calls close() instead.
   detach(): void { this.cb = null; }
 
+  /** How many messages are buffered right now (0 when live/attached). For the
+   *  shared-delivery UI to show "N waiting" per app. */
+  buffered(): number { return this.buffer.length; }
+
   // App reopened / client rebound: install the live callback, drain the buffered
   // messages IN ORDER (the app dedups by event id, so this is idempotent), and report
   // how many were delivered vs dropped. dropped > 0 ⇒ the cache overflowed while away,
