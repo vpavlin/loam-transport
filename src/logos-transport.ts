@@ -226,30 +226,64 @@ export async function publishSealed(topic: string, sealed: Uint8Array): Promise<
   if (mesh) { try { await mesh.send(makeFrame(topic, sealed)); } catch { /* mesh is best-effort */ } }
 }
 
-// ---- BLE mesh bearer (ADR 0012), opt-in ----
-// A second bearer beside Waku. The APP supplies the native radio (MeshRadio); this module
-// owns the portable gossip. Sends are fanned in publishSealed(); received frames are
-// funneled into the SAME broker route as Waku (topic-owned tenants open the sealed bytes),
-// so BLE traffic reaches the app through the exact path Waku traffic does — the sync layer
-// dedups by event id, so a message seen on both bearers is idempotent.
+// ---- BLE mesh bearer (ADR 0012) — TRANSPARENT, auto-armed on degrade ----
+// A second bearer beside Waku, and deliberately NOT an app feature. The node (this transport;
+// ultimately the shared delivery service, ADR 0010) owns the mesh. The app/service registers
+// the native radio ONCE via setMeshRadio(); the transport then AUTO-ARMS the mesh when the
+// internet path degrades (Waku peers hit 0 / isolated) and duty-cycles it DOWN when the fleet
+// is healthy again — apps just call publishSealed()/receive and never toggle anything. A
+// "conference" force keeps it on regardless. Received frames funnel into the SAME broker route
+// as Waku (the tenant opens the sealed bytes; sync dedups by event id), and sends fan to
+// whichever bearers are up — so BLE is invisible below the sync layer, by design.
 let mesh: BleMeshBearer | null = null;
-export async function enableMesh(radio: MeshRadio, opts?: { ttl?: number }): Promise<void> {
-  if (mesh) return;
+let meshRadioFactory: (() => MeshRadio) | null = null;
+let meshForced = false;
+let meshOpts: { ttl?: number } | undefined;
+let meshTimer: ReturnType<typeof setInterval> | null = null;
+
+// Register (or clear) the device's mesh radio capability. Called ONCE at node bring-up by the
+// app or the shared-delivery service — not per publish, not per app toggle.
+export function setMeshRadio(factory: (() => MeshRadio) | null, opts?: { ttl?: number }): void {
+  meshRadioFactory = factory; meshOpts = opts;
+  if (factory) {
+    if (!meshTimer) meshTimer = setInterval(() => { void evaluateMesh(); }, 15000);
+    void evaluateMesh();
+  } else {
+    if (meshTimer) { clearInterval(meshTimer); meshTimer = null; }
+    void disarmMesh();
+  }
+}
+// Conference / "offline mesh" override — the ONE user-facing control (ADR 0012): force the
+// mesh on regardless of fleet health. Off = transparent auto-arm-on-degrade.
+export function forceMesh(on: boolean): void { meshForced = on; void evaluateMesh(); }
+export function meshForcedOn(): boolean { return meshForced; }
+export function meshEnabled(): boolean { return mesh !== null; }
+export function meshPeers(): number { return mesh ? mesh.reachablePeers() : 0; }
+
+// The auto-arm decision. "Internet path degraded" = not confirmed-connected to the fleet;
+// counters.peers is the Waku peer count (refreshed here). NB: peer counts under-report on
+// Edge (a 0 is "unknown", never trusted as truth elsewhere) — so this errs toward arming the
+// fallback, which is the safe direction; the force override is the reliable path. The real
+// trigger will also watch publish failures — TODO once we have on-device signal.
+async function evaluateMesh(): Promise<void> {
+  if (!meshRadioFactory) return;
+  try { if (backend && typeof backend.refreshPeerInfo === "function") await backend.refreshPeerInfo(); } catch { /* */ }
+  const degraded = meshForced || counters.peers <= 0;
+  if (degraded && !mesh) await armMesh();
+  else if (!degraded && mesh && !meshForced) await disarmMesh();
+}
+async function armMesh(): Promise<void> {
+  if (mesh || !meshRadioFactory) return;
   ensure();
-  const m = new BleMeshBearer(radio, opts);
+  const m = new BleMeshBearer(meshRadioFactory(), meshOpts);
   m.onReceive((f) => {
     counters.rxRaw++;
-    // Funnel a BLE frame into the broker exactly like a Waku receive: the sealed bytes are
-    // a single decode candidate for whichever tenant owns the topic.
     const opened = shared ? shared._route(f.topic, [f.payload]) : false;
     if (opened) counters.rxNew++; else counters.rxDup++;
   });
-  await m.start();
-  mesh = m;
+  try { await m.start(); mesh = m; } catch { /* radio not ready — retry next tick */ }
 }
-export async function disableMesh(): Promise<void> { const m = mesh; mesh = null; if (m) await m.stop(); }
-export function meshEnabled(): boolean { return mesh !== null; }
-export function meshPeers(): number { return mesh ? mesh.reachablePeers() : 0; }
+async function disarmMesh(): Promise<void> { const m = mesh; mesh = null; if (m) { try { await m.stop(); } catch { /* */ } } }
 
 // Add topics after the node is up — via the tenant so the broker records ownership and
 // subscribes the underlying node exactly once per topic (refcounted).

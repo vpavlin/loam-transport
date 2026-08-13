@@ -163,9 +163,15 @@ The **portable half is done and proven**; the native radio is written but awaits
 - **Wire frame:** `[ ver(1) | hop(1) | topicLen(2 BE) | topic utf8 | payload… ]`. The id is
   *not* on the wire — recomputed from `(topic‖payload)` on receive, so a peer can't forge a
   different id and hop can't perturb it.
-- **Transport integration is opt-in and leaves the Waku path untouched.**
-  `publishSealed()` also floods the sealed bytes over the mesh when armed; `enableMesh(radio)`
-  funnels each BLE frame into the **same broker route** as a Waku receive — the sealed bytes
+- **Arming is TRANSPARENT — the node owns it, not the app.** The app/shared-service registers
+  the radio ONCE (`setMeshRadio(factory)`); a 15s watchdog **auto-arms** the mesh when the
+  fleet path is degraded (`counters.peers <= 0`) and **duty-cycles it down** when healthy —
+  apps never toggle a bearer. `forceMesh(on)` is the single user-facing override (the
+  "conference" case). This corrects an earlier per-app `enableMesh` design that leaked the
+  bearer into app code. Caveat: peer counts under-report, so the auto-trigger errs toward
+  arming (safe) and the force path is the reliable one; a publish-failure signal is a TODO.
+- **The Waku path is untouched.** `publishSealed()` also floods the sealed bytes over the mesh
+  when armed; an armed mesh funnels each BLE frame into the **same broker route** as a Waku receive — the sealed bytes
   are handed in as the tenant's single decode candidate, so the app `open()`s them exactly as
   it does Waku traffic and the sync layer dedups by event id. `enableMesh/disableMesh/
   meshEnabled/meshPeers`. Any `logos-transport` consumer (qaku, kym, scala all route through
