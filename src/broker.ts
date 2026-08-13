@@ -32,9 +32,15 @@ export class SharedDeliveryNode {
     this.node.onReceive((topic, payload) => this._route(topic, payload));
   }
 
-  registerTenant(tenantId: string): Tenant {
+  // `cacheLimit > 0` opts this tenant into offline caching (ADR 0011): when its app
+  // backgrounds/unbinds the broker keeps the subscription alive and buffers up to
+  // `cacheLimit` messages, delivered on reattach. Default 0 = today's behaviour
+  // (unbind drops the subscription). The opt-in is per approved app — the consent
+  // decision lives in the shared-delivery service, which passes the limit here.
+  registerTenant(tenantId: string, opts?: { cacheLimit?: number }): Tenant {
     let t = this.tenants.get(tenantId);
     if (!t) { t = new Tenant(this, tenantId); this.tenants.set(tenantId, t); }
+    if (opts && typeof opts.cacheLimit === "number") t.cacheLimit = opts.cacheLimit;
     return t;
   }
 
@@ -82,6 +88,18 @@ export class Tenant {
   topics = new Set<string>();
   cb: ((topic: string, payload: any) => boolean) | null = null;
 
+  /** Offline cache (ADR 0011). 0 = disabled. When > 0 and the app is detached, the
+   *  broker keeps the subscription and buffers incoming sealed payloads here (a ring
+   *  of at most `cacheLimit`), delivered in order on reattach. */
+  cacheLimit = 0;
+  private buffer: { topic: string; payload: any }[] = [];
+  /** Messages evicted because the ring was full while detached. A non-zero value on
+   *  reattach means the cache could NOT cover the gap → the app must reconcile. */
+  private dropped = 0;
+  /** The result of the most recent reattach() — read this after re-registering a
+   *  client to decide whether catch-up is needed (dropped > 0). */
+  lastReplay: { delivered: number; dropped: number } = { delivered: 0, dropped: 0 };
+
   constructor(broker: SharedDeliveryNode, id: string) { this.broker = broker; this.id = id; }
 
   onMessage(cb: (topic: string, payload: any) => boolean): this { this.cb = cb; return this; }
@@ -91,16 +109,45 @@ export class Tenant {
     await this.broker._subscribe(this.id, topic);
   }
 
+  // App backgrounded / client unbound, but this tenant caches: DROP the live callback
+  // yet KEEP the subscription — incoming messages now buffer instead of being lost.
+  // (No unsubscribe: that's the whole point.) For a non-caching tenant the service
+  // still calls close() instead.
+  detach(): void { this.cb = null; }
+
+  // App reopened / client rebound: install the live callback, drain the buffered
+  // messages IN ORDER (the app dedups by event id, so this is idempotent), and report
+  // how many were delivered vs dropped. dropped > 0 ⇒ the cache overflowed while away,
+  // so the app should still run catch-up; dropped === 0 ⇒ the cache was complete and
+  // catch-up can be skipped (the "avoid replay" win).
+  reattach(cb: (topic: string, payload: any) => boolean): { delivered: number; dropped: number } {
+    this.cb = cb;
+    const drained = this.buffer;
+    const dropped = this.dropped;
+    this.buffer = [];
+    this.dropped = 0;
+    for (const m of drained) cb(m.topic, m.payload);
+    this.lastReplay = { delivered: drained.length, dropped };
+    return this.lastReplay;
+  }
+
   // Release everything this tenant owns (unsubscribe its topics, drop it). Used by the
-  // shared-delivery service when a bound client disconnects.
+  // shared-delivery service when a NON-caching client disconnects (or on opt-out).
   async close(): Promise<void> {
     for (const t of this.topics) await this.broker._unsubscribe(this.id, t);
     this.topics.clear();
+    this.buffer = [];
+    this.dropped = 0;
     this.broker.tenants.delete(this.id);
     this.cb = null;
   }
 
   _deliver(topic: string, payload: any): boolean {
-    return this.cb ? this.cb(topic, payload) : false;
+    if (this.cb) return this.cb(topic, payload);   // live — deliver to the app now
+    if (this.cacheLimit > 0) {                       // detached + opted-in → cache it
+      this.buffer.push({ topic, payload });
+      while (this.buffer.length > this.cacheLimit) { this.buffer.shift(); this.dropped++; }
+    }
+    return false;                                    // not opened by the app right now
   }
 }

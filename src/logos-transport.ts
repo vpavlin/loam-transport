@@ -151,14 +151,37 @@ export function getCtx(): string { return backend ? backend.getCtx() : ""; }
 // ONE tenant per bound client app instead: each client subscribes via its Tenant, sends
 // via publishSealed(topic,bytes) (send is node-level), and receives via its onMessage,
 // routed by content topic. Bring the node up first with start({topics:[], …}).
-export function registerClient(appId: string, onMessage: (topic: string, candidates: Uint8Array[]) => boolean): Tenant {
-  ensure(); return shared!.registerTenant(appId).onMessage(onMessage);
+// `opts.cacheLimit > 0` opts this client into offline caching (ADR 0011): when it
+// unbinds, the service keeps its subscription and buffers messages instead of
+// dropping them. The consent decision (per approved app) lives in the service and
+// is passed here. Re-registering an already-known (detached) client REATTACHES —
+// it drains the buffer through `onMessage` in order and returns the replay report
+// (`dropped > 0` means the cache overflowed, so the client should still reconcile).
+export function registerClient(
+  appId: string,
+  onMessage: (topic: string, candidates: Uint8Array[]) => boolean,
+  opts?: { cacheLimit?: number },
+): Tenant {
+  ensure();
+  const existed = shared!.tenants.has(appId);
+  const tenant = shared!.registerTenant(appId, opts);
+  // Re-bind of a cached, detached client → drain what arrived while it was away
+  // (report is on tenant.lastReplay: dropped > 0 means the client should reconcile).
+  if (existed && tenant.cacheLimit > 0) tenant.reattach(onMessage as any);
+  else tenant.onMessage(onMessage);
+  return tenant;
 }
 export function clientSubscribe(appId: string, topic: string): Promise<void> {
   ensure(); const t = shared!.tenants.get(appId); return t ? t.subscribe(topic) : Promise.resolve();
 }
-export function unregisterClient(appId: string): Promise<void> {
-  ensure(); const t = shared!.tenants.get(appId); return t ? t.close() : Promise.resolve();
+// Client unbound. A caching client DETACHES (keep the subscription + buffer, unless
+// `hard`); a non-caching one (or hard opt-out) CLOSES (unsubscribe + drop).
+export function unregisterClient(appId: string, opts?: { hard?: boolean }): Promise<void> {
+  ensure();
+  const t = shared!.tenants.get(appId);
+  if (!t) return Promise.resolve();
+  if (t.cacheLimit > 0 && !(opts && opts.hard)) { t.detach(); return Promise.resolve(); }
+  return t.close();
 }
 
 // Bring the node up (or, if up, join new topics), then record topic ownership so the

@@ -34,3 +34,4 @@ ADRs are the "why + what-breaks-if-reverted."
 - [0008](0008-entrynodes-and-preset-carry-the-cluster.md) — entryNodes required; the preset carries the cluster
 - [0009](0009-no-store-on-desktop.md) — No Store query on desktop → backfill is the app's job
 - [0010](0010-shared-node-broker-and-servicenode.md) — One node per phone: the broker + ServiceNode seam
+- [0011](0011-per-tenant-offline-cache.md) — Per-tenant offline cache in the shared node

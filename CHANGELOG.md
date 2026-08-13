@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.0 — 2026-08-13
+- **Per-tenant offline cache (ADR 0011).** The shared node keeps a backgrounded app's
+  subscription alive and buffers its (opaque, sealed) messages instead of dropping
+  them; on reopen the app drains the buffer in order, then reconciles only the
+  remainder. Opt-in per approved app (`cacheLimit`); bounded ring; `dropped > 0`
+  signals the app to still run catch-up. New broker API: `Tenant.detach()`/
+  `reattach()`/`cacheLimit`/`lastReplay`; `registerTenant(id,{cacheLimit})`;
+  `registerClient(...,{cacheLimit})` (re-register reattaches) / `unregisterClient(id,
+  {hard?})`. Test: `test/broker-cache.test.ts`.
+- docs: ADR log gained 0000–0011 (the "why" behind the spec).
+
+
 ## 0.2.0
 - Mobile transport now runs over a multi-tenant **broker seam** (`src/broker.ts`
   `SharedDeliveryNode`+`Tenant`+`UnderlyingNode`, `src/real-node.ts` `RealNode`).
