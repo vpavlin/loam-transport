@@ -1,7 +1,7 @@
 # 12. BLE mesh as a second bearer
 
-- **Status:** proposed (design doc — not yet built)
-- **Date:** 2026-08-13
+- **Status:** accepted — **portable core built & proven (9 tests); native radio written, not yet device-verified**
+- **Date:** 2026-08-13 (revised with implementation learnings)
 
 ## Context
 
@@ -140,10 +140,54 @@ write.
   sealed frames over raw GATT via the shared node, trigger-on-degrade; **v2** topic-aware
   forwarding + a Wi-Fi Aware bulk bearer behind the same interface.
 
-## Open questions
+## Implementation notes — what got built (and what the code taught us)
 
-- iOS background advertising/scan reliability — the make-or-break; needs a hardware spike.
-- Mesh admission: fully open (rely on rate-limits) vs a shared mesh secret vs PoW.
-- Frame header/versioning for the Loam BLE protocol (fragmentation, hop TTL, seen-id).
-- Do we expose "who's reachable over BLE" to apps (a presence signal), or keep the
-  bearer invisible below the sync layer?
+The **portable half is done and proven**; the native radio is written but awaits hardware.
+
+- **The abstraction holds, and it's smaller than the sketch.** `src/bearer.ts`:
+  `Bearer` (`start/stop/send/onReceive/reachablePeers`), `MultiBearer` (fan-out + deduped
+  funnel), `BleMeshBearer` (flood-gossip: seen-set + hop-TTL + store-carry-forward) over a
+  `MeshRadio` interface (`start/stop/peers/sendTo/onReceiveFrom`). `reachablePeers()` earned
+  its place; a separate topic-bloom method did not (deferred to v2, as planned).
+- **Dedup is by a content-hash frame id, not a generated one** —
+  `id = sha256(topic ‖ 0x00 ‖ payload)[:16]`. So the *same* sealed message collapses whether
+  it arrived over Waku or was flooded over BLE, with **no shared id generator** — this is what
+  lets MultiBearer funnel "once" and lets `send()` suppress its own echo. `hop` is deliberately
+  **excluded** from the id so forwarding (which decrements hop) never changes identity.
+- **The portable/native split is clean and testable with zero hardware.** All mesh
+  intelligence (loop-kill, TTL, forwarding) lives in `BleMeshBearer`; the radio is a *dumb*
+  link. `test/bearer.test.ts` drives the real gossip over an in-memory `MockRadio` graph —
+  **9 tests green** (`node --test`): multi-hop line, cycle/loop dedup, TTL bound, star relay,
+  content-id stability, wire round-trip, and MultiBearer fan-out / cross-bearer funnel /
+  echo-suppression. This validated the design before a single Kotlin line ran.
+- **Wire frame:** `[ ver(1) | hop(1) | topicLen(2 BE) | topic utf8 | payload… ]`. The id is
+  *not* on the wire — recomputed from `(topic‖payload)` on receive, so a peer can't forge a
+  different id and hop can't perturb it.
+- **Transport integration is opt-in and leaves the Waku path untouched.**
+  `publishSealed()` also floods the sealed bytes over the mesh when armed; `enableMesh(radio)`
+  funnels each BLE frame into the **same broker route** as a Waku receive — the sealed bytes
+  are handed in as the tenant's single decode candidate, so the app `open()`s them exactly as
+  it does Waku traffic and the sync layer dedups by event id. `enableMesh/disableMesh/
+  meshEnabled/meshPeers`. Any `logos-transport` consumer (qaku, kym, scala all route through
+  `publishSealed`) gains the mesh by handing over a radio.
+- **Native radio (`native/blemesh/`, Android, UNVERIFIED).** Dual-role GATT: advertise a fixed
+  Loam service UUID + run a write/notify characteristic (peripheral) while scanning + dialing
+  Loam peers (central); a device is a "peer" by address in *either* role. Concrete decisions
+  the code forced: a **connect tiebreak** (only the lower address dials, to avoid A↔B opening
+  two links) and **MTU-aware fragmentation** with a 4-byte `[msgId|idx|count]` header +
+  per-`(addr,msgId)` reassembly. RN adapter (`loam-mesh-radio.ts`) + a prebuild-surviving
+  config plugin (`withLoamMesh.js`, copies the `.kt`, registers the package, adds the
+  Android-12 BLE perms).
+
+## Open questions (updated)
+
+- **iOS** background advertising/scan reliability — still the make-or-break; needs a hardware
+  spike. (v1 is Android-only.)
+- **The connect-tiebreak needs a real address.** Android often returns a randomized/placeholder
+  `adapter.address` (`02:00:00:00:00:00`); the code guards that case, but the real fix is to
+  carry a stable per-node id in the advertisement (or the first framed handshake) and tiebreak
+  on *that*, not the MAC. Do this before the hardware spike.
+- Mesh admission: fully open (rely on rate-limits + seen-set) vs a shared mesh secret vs PoW.
+- Presence: expose "who's reachable over BLE" to apps, or keep the bearer invisible below sync?
+  `meshPeers()` gives a count today; a per-peer presence signal is still open.
+- v2: topic-bloom forwarding + a Wi-Fi Aware bulk bearer behind the same `Bearer` interface.
