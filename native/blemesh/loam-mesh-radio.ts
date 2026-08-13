@@ -7,7 +7,7 @@
 //   if (LoamMeshRadio.available()) await enableMesh(new LoamMeshRadio());
 //
 // Android-only (arm64), foreground/shared-service context. iOS is a later bearer (ADR 0012).
-import { NativeModules, NativeEventEmitter, Platform } from "react-native";
+import { NativeModules, NativeEventEmitter, Platform, PermissionsAndroid } from "react-native";
 import { fromByteArray, toByteArray } from "base64-js";
 import type { MeshRadio } from "../../src/bearer";
 
@@ -23,6 +23,16 @@ export class LoamMeshRadio implements MeshRadio {
 
   async start(): Promise<void> {
     if (!Native) throw new Error("LoamMesh native module not present");
+    // Android 12+ (API 31) requires runtime BLE permissions; request before starting.
+    if (Platform.OS === "android" && Number(Platform.Version) >= 31) {
+      try {
+        await PermissionsAndroid.requestMultiple([
+          "android.permission.BLUETOOTH_SCAN" as any,
+          "android.permission.BLUETOOTH_ADVERTISE" as any,
+          "android.permission.BLUETOOTH_CONNECT" as any,
+        ]);
+      } catch { /* the native start() will surface a denial */ }
+    }
     this.emitter = new NativeEventEmitter(Native);
     this.subs.push(this.emitter.addListener("loamMeshRx", (e: { peer: string; data: string }) => {
       try { this.cb(e.peer, toByteArray(e.data)); } catch { /* ignore a bad frame */ }
