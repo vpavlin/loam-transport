@@ -144,3 +144,10 @@ spec of the wire behavior.
 
 - **KYM** (budget) — `kym/mobile/src/lib/delivery.ts` adapter
 - **qaku** (Q&A) — `qaku-logos/mobile/src/lib/delivery.ts` adapter
+
+## Why it is shaped this way
+
+The [`docs/adr/`](docs/adr/) log records the load-bearing decisions (crypto-agnostic
+bytes, SDS-over-relay, subscribe-before-channelCreate, the base64/byte-array framing,
+async-or-deadlock, Core/Edge, the reconnect watchdog, entryNodes+cluster, no-Store-on-
+desktop, the shared-node seam) — the *why* behind the [`docs/TRANSPORT_SPEC.md`](docs/TRANSPORT_SPEC.md) *how*.
