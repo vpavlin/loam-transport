@@ -20,6 +20,10 @@ import type { MeshRadio } from "./bearer";
 export const counters = {
   rxRaw: 0, rxNoPayload: 0, rxSelfEcho: 0, rxSeen: 0,
   rxOpened: 0, rxOpenFail: 0, rxNew: 0, rxDup: 0, txTotal: 0, txAttempt: 0, txFail: 0, peers: -1, mesh: -1,
+  // BLE-mesh-specific (ADR 0012), kept separate from the Waku rx/tx above so the card can
+  // localize a BLE failure: bleTx = frames we handed to the mesh to flood; bleRx = frames
+  // that arrived FROM the mesh at the JS layer. bleRx climbing with no internet == BLE works.
+  bleTx: 0, bleRx: 0,
 };
 export const diag = { chan: 0, msg: 0, err: 0, sample: "", txErr: "" };
 export function getRxSample(): string {
@@ -222,8 +226,14 @@ export async function start(opts: { deviceId: string; topics: string[]; onReceiv
 // event log doesn't care which bearer carried a write, and dedup is by event id.
 export async function publishSealed(topic: string, sealed: Uint8Array): Promise<void> {
   ensure();
+  // The two bearers are INDEPENDENT (that's the point of MultiBearer). Flood the mesh
+  // FIRST and swallow its errors, so a Waku failure can't skip it — otherwise a fully
+  // offline phone (backend.send throws: node not settled, or lightpush has no peers)
+  // never floods its own writes onto BLE, and only online→offline propagates. The Waku
+  // send stays AFTER and still throws on failure, so the caller's requeue-for-Waku logic
+  // (retry when back online → the event still reaches the fleet/store) is preserved.
+  if (mesh) { counters.bleTx++; try { await mesh.send(makeFrame(topic, sealed)); } catch { /* mesh is best-effort */ } }
   await backend!.send(topic, sealed);
-  if (mesh) { try { await mesh.send(makeFrame(topic, sealed)); } catch { /* mesh is best-effort */ } }
 }
 
 // ---- BLE mesh bearer (ADR 0012) — TRANSPARENT, auto-armed on degrade ----
@@ -277,7 +287,7 @@ async function armMesh(): Promise<void> {
   ensure();
   const m = new BleMeshBearer(meshRadioFactory(), meshOpts);
   m.onReceive((f) => {
-    counters.rxRaw++;
+    counters.rxRaw++; counters.bleRx++;
     const opened = shared ? shared._route(f.topic, [f.payload]) : false;
     if (opened) counters.rxNew++; else counters.rxDup++;
   });

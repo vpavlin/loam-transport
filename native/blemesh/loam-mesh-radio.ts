@@ -18,8 +18,19 @@ export class LoamMeshRadio implements MeshRadio {
   private subs: { remove: () => void }[] = [];
   private cb: (peer: string, bytes: Uint8Array) => void = () => {};
   private peerList: string[] = [];
+  private nodeId: string;
+
+  // nodeId = the app's stable deviceId (ADR 0014). Handed to native before start() so the
+  // mesh keys peers by this stable id, not the rotating BLE MAC.
+  constructor(nodeId: string = "") { this.nodeId = nodeId; }
 
   static available(): boolean { return Platform.OS === "android" && !!Native; }
+
+  // Compact native BLE data-path diagnostic (fragments sent/recv/delivered, MTU, last error).
+  // Surfaced on the debug card so a BLE failure can be localized without adb.
+  static async stats(): Promise<string> {
+    try { return Native && Native.stats ? await Native.stats() : ""; } catch { return ""; }
+  }
 
   async start(): Promise<void> {
     if (!Native) throw new Error("LoamMesh native module not present");
@@ -40,6 +51,7 @@ export class LoamMeshRadio implements MeshRadio {
     this.subs.push(this.emitter.addListener("loamMeshPeers", (e: { peers: string[] }) => {
       this.peerList = Array.isArray(e.peers) ? e.peers : [];
     }));
+    try { if (this.nodeId && Native.setNodeId) await Native.setNodeId(this.nodeId); } catch { /* */ }
     await Native.start();
     // seed the peer list once (events keep it fresh thereafter)
     try { this.peerList = await Native.peers(); } catch { /* */ }

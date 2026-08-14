@@ -1,4 +1,4 @@
-package co.logos.mesh
+package xyz.vpavlin.loam.mesh
 
 import com.facebook.react.ReactPackage
 import com.facebook.react.bridge.NativeModule

@@ -1,5 +1,5 @@
 {
-  "name": "logos-transport",
+  "name": "loam-transport",
   "version": "0.8.0",
   "description": "Shared crypto-agnostic sync transport over liblogosdelivery + SDS Reliable Channels. Mobile (React Native/Expo, arm64 Android) + Basecamp (C++) sides, wire-compatible. Proven in KYM + qaku.",
   "main": "src/logos-transport.ts",

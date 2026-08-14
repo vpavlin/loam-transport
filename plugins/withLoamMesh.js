@@ -2,7 +2,7 @@
 // withLogosDelivery, it survives `expo prebuild` by re-copying native files and hand-
 // registering the RN package (not autolinkable). It:
 //   - copies native/blemesh/android/java/** → app/src/main/java/**
-//   - registers co.logos.mesh.LoamMeshPackage() in MainApplication
+//   - registers xyz.vpavlin.loam.mesh.LoamMeshPackage() in MainApplication
 //   - adds the Android 12+ BLE runtime permissions (+ legacy fallbacks)
 const { withDangerousMod, withMainApplication, withAndroidManifest } = require("@expo/config-plugins");
 const fs = require("fs");
@@ -28,13 +28,13 @@ const withCopy = (config) =>
 const withRegister = (config) =>
   withMainApplication(config, (cfg) => {
     let src = cfg.modResults.contents;
-    if (src.includes("co.logos.mesh.LoamMeshPackage()")) return cfg;
+    if (src.includes("xyz.vpavlin.loam.mesh.LoamMeshPackage()")) return cfg;
     if (/PackageList\(this\)\.packages\.apply\s*\{/.test(src)) {
       src = src.replace(/(PackageList\(this\)\.packages\.apply\s*\{)/,
-        `$1\n            add(co.logos.mesh.LoamMeshPackage())`);
+        `$1\n            add(xyz.vpavlin.loam.mesh.LoamMeshPackage())`);
     } else if (/return\s+PackageList\(this\)\.packages\b(?!\.)/.test(src)) {
       src = src.replace(/return\s+PackageList\(this\)\.packages\b(?!\.)/,
-        `return PackageList(this).packages.apply {\n            add(co.logos.mesh.LoamMeshPackage())\n          }`);
+        `return PackageList(this).packages.apply {\n            add(xyz.vpavlin.loam.mesh.LoamMeshPackage())\n          }`);
     } else {
       throw new Error("withLoamMesh: could not find PackageList(this).packages to register the package");
     }
