@@ -92,8 +92,11 @@ how many explicit base64 ops they apply because their FFIs differ:
 
 ## L7 — Node config
 
-- `{ mode:"Core", preset:"logos.dev", relay:true, entryNodes:[…6 fleet…] }`. entryNodes
+- `{ mode:"Core", preset:"logos.test", relay:true, entryNodes:[…6 fleet…] }`. entryNodes
   MUST be pinned on BOTH mobile and desktop, or the node never meshes ("Connected" but 0 peers).
+  `preset` MUST be `logos.test` (cluster 2) — `logos.dev` is cluster 3 and fails to mesh (ADR 0008).
+  `mode` shown as `Core` here for the desktop/hub; the **mobile default is `Edge`** (mobile-safe:
+  filter/lightpush, works on cellular, lighter) — see ADR 0006. Core is the opt-in stable-WiFi relay mode.
 
 ## L8 — Lease renewal
 

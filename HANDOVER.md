@@ -1,4 +1,4 @@
-# Handover — integrating `logos-transport` into scala (Basecamp core)
+# Handover — integrating `loam-transport` into scala (Basecamp core)
 
 **Audience:** the agent building **scala** (a Basecamp-only Logos app, C++ core, no mobile
 yet). **Goal:** give scala's core two-way multi-writer sync over Logos Delivery / SDS
@@ -6,7 +6,7 @@ Reliable Channels by dropping in the shared, proven transport instead of re-deri
 
 ## What this repo is
 
-`logos-transport` is the sync transport extracted from two **shipping, proven** Logos apps
+`loam-transport` is the sync transport extracted from two **shipping, proven** Logos apps
 — **KYM** (budget) and **qaku** (Q&A). It moves **opaque sealed bytes** on content topics
 over SDS Reliable Channels; it is **crypto-agnostic** (your core owns keys/envelope). Two
 wire-compatible sides live here:

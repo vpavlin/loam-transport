@@ -1,7 +1,7 @@
-# logos-transport
+# loam-transport
 
 A **shared, crypto-agnostic sync transport** for React Native / Expo apps built on
-the Logos stack. It runs an embedded Waku node (`liblogosdelivery`) on the device and
+the Logos stack. It runs an embedded Logos node (`liblogosdelivery`) on the device and
 moves **opaque sealed bytes** over **SDS Reliable Channels**, giving you two-way,
 multi-writer sync between phones and a desktop [Basecamp](https://logos.co) module.
 
@@ -24,7 +24,7 @@ history pull from the fleet store, and reconnection.
 ## The idea
 
 ```
-your app                          logos-transport (this repo)
+your app                          loam-transport (this repo)
 ─────────                         ───────────────────────────
 seal/open (your keys)   ──────►   publishSealed(topic, bytes)  ─► SDS channel ─► fleet
 topic derivation                  onReceive(topic, candidates) ◄─ live mesh   ◄─ fleet
@@ -64,6 +64,27 @@ wire to this module. See [`examples/`](examples/) for the real KYM and qaku adap
 `onReceive(topic, candidates: Uint8Array[]) => boolean` — try to `open()` a candidate
 with your key(s); **return `true` iff one opened** (so the transport tallies
 `rxOpened` vs `rxOpenFail`).
+
+## Second bearer: the BLE offline mesh
+
+The transport can move the **same sealed bytes** over a **BLE mesh** as a second
+bearer beside the Logos/Waku wire, so nearby phones sync with no fleet and no
+internet (ADRs [0012](docs/adr/0012-ble-mesh-bearer.md)–[0014](docs/adr/0014-identity-first-ble-connections.md)).
+`src/bearer.ts` holds the bearer abstraction: a `BleMeshBearer` (flood/relay with
+hop-limited frames and a seen-set) and a `MultiBearer` that fans one publish out to
+every bearer and funnels receives back in, deduped. You hand the transport a native
+GATT radio **once** with `setMeshRadio(factory)`; it then **auto-arms** the mesh when
+peers appear. `forceMesh(true)` pins it on; `meshPeers()` reports reachable mesh
+peers. Desktop can act as a relay gateway (ADR 0013); connections are identity-first
+(ADR 0014).
+
+## Shared-node UI components
+
+For apps that ride the device-wide shared node, the package ships ready-made React
+components so you don't hand-roll status UI: **`SharedNodeBanner`** (prompts to
+open/approve the shared service when it needs attention), **`SharedNodeStatus`** (live
+peers/mesh/approval state), and **`LoamDebug`** (a diagnostics panel). Import them from
+the package instead of writing your own banner.
 
 ---
 
@@ -109,8 +130,9 @@ with your key(s); **return `true` iff one opened** (so the transport tallies
    installed version (this is the only per-app edit KYM vs qaku needed).
 5. **Hermes-safe UTF-8 only.** `TextEncoder`/`TextDecoder` are not guaranteed on
    Hermes — use the hand-rolled `utf8.ts` (bundled), never the globals.
-6. **Node config is minimal on purpose.** `{mode:"Core", preset:"logos.dev",
-   relay:true, entryNodes}` (+ the two coexistence fields). **Do not add light-client
+6. **Node config is minimal on purpose.** `{mode:"Core", preset:"logos.test",
+   relay:true, entryNodes}` (+ the two coexistence fields). Use `logos.test`
+   (cluster 2) — `logos.dev` is cluster 3 and fails to mesh (see ADR 0008). **Do not add light-client
    fields** (filter/lightpush/store/service-nodes) — `waku_new` rejects them and the
    node comes up "offline".
 7. **Settle window.** The node isn't `ready` (and the receive listener is gated off)
