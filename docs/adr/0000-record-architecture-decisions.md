@@ -38,3 +38,4 @@ ADRs are the "why + what-breaks-if-reverted."
 - [0012](0012-ble-mesh-bearer.md) — BLE mesh as a second bearer *(accepted; portable core proven, native radio not yet device-verified)*
 - [0013](0013-desktop-ble-relay-gateway.md) — Desktop/laptop as a BLE mesh relay & internet gateway *(proposed)*
 - [0014](0014-identity-first-ble-connections.md) — Identity-first BLE connection management *(accepted; implementing)*
+- [0015](0015-loam-on-desktop-composable-core-modules.md) — Loam on desktop: composable logos-core modules (delivery + ble_mesh) *(proposed)*
