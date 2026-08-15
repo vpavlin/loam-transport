@@ -24,6 +24,10 @@ export const counters = {
   // localize a BLE failure: bleTx = frames we handed to the mesh to flood; bleRx = frames
   // that arrived FROM the mesh at the JS layer. bleRx climbing with no internet == BLE works.
   bleTx: 0, bleRx: 0,
+  // Of the bleRx frames, how many the broker actually ROUTED to a tenant (delivered) vs
+  // DROPPED as a foreign/unowned topic. bleRx climbing but bleRxDropped climbing == the
+  // receiving side never subscribed the topic (the drop is here, not the radio).
+  bleRxDelivered: 0, bleRxDropped: 0,
 };
 export const diag = { chan: 0, msg: 0, err: 0, sample: "", txErr: "" };
 export function getRxSample(): string {
@@ -311,7 +315,8 @@ async function armMesh(): Promise<void> {
   m.onReceive((f) => {
     counters.rxRaw++; counters.bleRx++;
     const opened = shared ? shared._route(f.topic, [f.payload]) : false;
-    if (opened) counters.rxNew++; else counters.rxDup++;
+    if (opened) { counters.rxNew++; counters.bleRxDelivered++; }
+    else { counters.rxDup++; counters.bleRxDropped++; }
   });
   try { await m.start(); mesh = m; } catch { /* radio not ready — retry next tick */ }
 }
@@ -321,7 +326,10 @@ async function disarmMesh(): Promise<void> { const m = mesh; mesh = null; if (m)
 // subscribes the underlying node exactly once per topic (refcounted).
 export async function join(topics: string[]): Promise<void> {
   ensure();
-  if (!backend!.isReady()) return;
+  // Subscribe when the node is Waku-ready OR the BLE mesh is armed. Otherwise, over a BLE-only
+  // (fleet-down) start, added topics never get owned by the broker and every incoming mesh frame
+  // on them is dropped as "foreign/unowned" (see SharedDeliveryNode._route).
+  if (!backend!.isReady() && !mesh) return;
   for (const t of topics) if (!tenant!.topics.has(t)) await tenant!.subscribe(t);
 }
 
