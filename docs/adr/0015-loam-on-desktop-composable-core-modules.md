@@ -158,6 +158,30 @@ is later introduced. Until then, "caching" on desktop = the existing on-disk log
 - New native surface (Qt Bluetooth + a C++ gossip port) is contained inside `ble_mesh`; `loam_core`,
   app cores, and `delivery_module` are unaffected if BLE is absent (mesh simply reports 0 peers).
 
+## Code reuse & parity (Android ↔ desktop)
+
+Android/mobile is Kotlin+TS; desktop is C++ — no source sharing across that boundary. So we
+buy interop the way kym/qaku already prove crypto parity, not by sharing code:
+
+1. **One wire spec, two implementations.** The BLE GATT constants (service/char/CCCD UUIDs,
+   MTU, the `[msgId,idx,count]` fragmentation header) and the bearer frame
+   `[ver|hop|topicLen|topic|payload]` + `frameId = sha256(topic‖0x00‖payload)[:16]` are a single
+   normative spec (in `bearer.ts` / `LoamMeshModule` today). Extract those into a **shared spec
+   doc + a small constants file per language** so neither side drifts. `frameId` is already ported
+   verbatim into `loam_core` (`multibearer.hpp`) — that's the first parity point.
+2. **Golden test vectors.** The gossip/frame codec gets a language-neutral vector set (inputs →
+   expected frame bytes / frameId / reassembly), committed once and run by BOTH the TS suite and
+   the C++ `ble_mesh` tests — the same pattern as kym_core's `crypto_parity.cpp` against JS golden
+   JSON. This verifies the C++ port byte-for-byte without shared source.
+3. **Same facade shape both sides.** `loam_core`'s API deliberately mirrors the mobile
+   loam-transport surface (`start/join/sendSealed/received`, `forceMesh/setNodeMode`, per-bearer
+   metrics), so design, docs, and mental model transfer even though the code doesn't.
+
+Within the C++/Basecamp world, reuse is real source reuse: `loam_core` (+ its bearers) is shared
+by **every** Basecamp app, and its internals started as scala's proven `logos_transport.hpp`
+generalised to a MultiBearer. So "reuse between the two implementations" = shared wire spec +
+shared vectors + one C++ transport module for all desktop apps.
+
 ## Risks / open questions
 
 1. **Desktop peripheral role.** `QLowEnergyController::PeripheralRole` + GATT server on Linux
