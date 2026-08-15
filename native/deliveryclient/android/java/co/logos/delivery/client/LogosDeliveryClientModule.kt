@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.ServiceConnection
 import android.os.IBinder
 import android.util.Base64
+import android.util.Log
 import co.logos.delivery.ILogosDelivery
 import co.logos.delivery.ILogosDeliveryCallback
 import com.facebook.react.bridge.Arguments
@@ -22,6 +23,7 @@ class LogosDeliveryClientModule(private val ctx: ReactApplicationContext) : Reac
   override fun getName() = "LogosDeliveryClient"
   private var svc: ILogosDelivery? = null
   private var appId: String = "app"
+  @Volatile private var lastDiag: String = "connect() not called"
   private var pending: Promise? = null
 
   private val callback = object : ILogosDeliveryCallback.Stub() {
@@ -51,10 +53,17 @@ class LogosDeliveryClientModule(private val ctx: ReactApplicationContext) : Reac
 
   @ReactMethod fun connect(promise: Promise) {
     if (svc != null) { promise.resolve(true); return }
+    val intent = intentFor()
+    // Does the target service even RESOLVE for us? (component correct + visible via <queries>)
+    val ri = try { ctx.packageManager.resolveService(intent, 0) } catch (_: Throwable) { null }
     pending = promise
-    val ok = try { ctx.bindService(intentFor(), conn, Context.BIND_AUTO_CREATE) } catch (_: Throwable) { false }
+    val ok = try { ctx.bindService(intent, conn, Context.BIND_AUTO_CREATE) } catch (t: Throwable) { lastDiag = "bind threw: ${t.message}"; false }
+    lastDiag = "target=${intent.component?.flattenToShortString()} resolves=${ri?.serviceInfo?.let { it.packageName + "/" + it.name } ?: "NULL (not visible/installed)"} bindReturned=$ok"
+    Log.i("LOAMBIND", lastDiag)
     if (!ok) { pending = null; promise.resolve(false) }
   }
+  // Read the last bind attempt's outcome (surfaced in-app so we can see why sync fell back).
+  @ReactMethod fun diag(promise: Promise) { promise.resolve("$lastDiag connected=${svc != null} appId=$appId") }
   // Re-bind after the service went away (update/kill). No-op if already bound.
   @ReactMethod fun reconnect() { if (svc == null) try { ctx.bindService(intentFor(), conn, Context.BIND_AUTO_CREATE) } catch (_: Throwable) {} }
 

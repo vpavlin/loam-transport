@@ -146,6 +146,14 @@ export function usingServiceBackend(): boolean { return backend instanceof Servi
 export function serviceNodeDown(): boolean { return backend instanceof ServiceNode ? backend.isNodeDown() : false; }
 export function serviceAwaitingApproval(): boolean { return backend instanceof ServiceNode ? backend.isAwaitingApproval() : false; }
 export function launchSharedService(): void { if (backend instanceof ServiceNode) backend.launchService(); }
+// Explicit "why isn't the shared node being used" diagnostic — surfaced in-app for debugging.
+let lastServiceError = "";
+export async function serviceDiag(): Promise<string> {
+  const avail = ServiceNode.available();
+  const usingSvc = backend instanceof ServiceNode;
+  const nodeDiag = usingSvc ? await (backend as ServiceNode).diag() : "backend is embedded (RealNode)";
+  return `prefer=${preferService} available=${avail} using=${usingSvc} | ${nodeDiag}${lastServiceError ? " | " + lastServiceError : ""}`;
+}
 
 export function deliveryAvailable(): boolean { return RealNode.available() || ServiceNode.available(); }
 export function getStoreInfo(): string { return backend ? backend.storeInfo : ""; }
@@ -212,6 +220,7 @@ export async function start(opts: { deviceId: string; topics: string[]; onReceiv
     // Shared service selected but not bindable (Logos Delivery not installed) → fall back
     // to an embedded node so the app still works standalone.
     if (backend instanceof ServiceNode) {
+      lastServiceError = "start fell back: " + String((e as any)?.message || e);
       try { opts.onStatus && opts.onStatus("Shared node unavailable — using own node"); } catch { /* */ }
       wire(makeReal());
       backend!.setDeviceId(opts.deviceId);

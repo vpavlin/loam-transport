@@ -65,6 +65,7 @@ export class ServiceNode implements UnderlyingNode {
   isNodeDown(): boolean { return this.nodeDown; }
   // Bring the Logos Delivery app to the foreground so its node starts (call from foreground).
   launchService(): void { try { Client.launchService && Client.launchService(); } catch { /* */ } }
+  async diag(): Promise<string> { try { return Client && Client.diag ? await Client.diag() : "client module has no diag()"; } catch (e: any) { return "diag() threw: " + (e?.message || e); } }
   async serviceInstalled(): Promise<boolean> { try { return await Client.isInstalled(); } catch { return false; } }
 
   async start(initialTopics: string[], onStatus?: (s: string) => void): Promise<void> {

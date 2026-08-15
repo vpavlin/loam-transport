@@ -12,30 +12,34 @@
 import React, { useEffect, useState } from "react";
 import { View, Text, StyleSheet } from "react-native";
 import { SharedNodeBanner } from "./SharedNodeBanner";
-import { counters, refreshPeerInfo } from "./logos-transport";
+import { counters, refreshPeerInfo, serviceDiag } from "./logos-transport";
 
 export function SharedNodeStatus({
   appName,
   showSync = false,
+  debug = false,
   pollMs = 3000,
   style,
-}: { appName?: string; showSync?: boolean; pollMs?: number; style?: any }) {
+}: { appName?: string; showSync?: boolean; debug?: boolean; pollMs?: number; style?: any }) {
   const [, force] = useState(0);
+  const [diag, setDiag] = useState("");
   useEffect(() => {
     let alive = true;
     const tick = async () => {
       try { await refreshPeerInfo(); } catch { /* best-effort */ }
+      if (debug) { try { setDiag(await serviceDiag()); } catch { /* */ } }
       if (alive) force((n) => n + 1);
     };
     tick();
     const id = setInterval(tick, pollMs);
     return () => { alive = false; clearInterval(id); };
-  }, [pollMs]);
+  }, [pollMs, debug]);
 
   return (
     <View style={style}>
       <SharedNodeBanner appName={appName} />
       {showSync ? <SyncLine /> : null}
+      {debug && diag ? <Text style={st.diag} selectable>{diag}</Text> : null}
     </View>
   );
 }
@@ -60,4 +64,5 @@ const st = StyleSheet.create({
   row: { flexDirection: "row", alignItems: "center", gap: 6, paddingVertical: 4 },
   dot: { width: 8, height: 8, borderRadius: 4 },
   txt: { color: "#9ca3af", fontSize: 12 },
+  diag: { color: "#f59e0b", fontSize: 10, fontFamily: "monospace", marginTop: 4 },
 });
