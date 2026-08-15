@@ -258,8 +258,17 @@ export async function publishSealed(topic: string, sealed: Uint8Array): Promise<
   // never floods its own writes onto BLE, and only online→offline propagates. The Waku
   // send stays AFTER and still throws on failure, so the caller's requeue-for-Waku logic
   // (retry when back online → the event still reaches the fleet/store) is preserved.
-  if (mesh) { counters.bleTx++; try { await mesh.send(makeFrame(topic, sealed)); } catch { /* mesh is best-effort */ } }
-  await backend!.send(topic, sealed);
+  let meshOk = false;
+  if (mesh) { counters.bleTx++; try { await mesh.send(makeFrame(topic, sealed)); meshOk = true; } catch { /* mesh is best-effort */ } }
+  try {
+    await backend!.send(topic, sealed);
+  } catch (e) {
+    // The Waku send throws when the node isn't fleet-settled ("node-null"), so an online caller
+    // re-queues for retry. But over a BLE-only start the mesh ALREADY carried the frame to nearby
+    // peers — so swallowing the throw here (only when meshOk) stops the app from queuing a write
+    // that DID propagate. Online (no mesh armed) the throw still bubbles up → retry-for-fleet.
+    if (!meshOk) throw e;
+  }
 }
 
 // ---- BLE mesh bearer (ADR 0012) — TRANSPARENT, auto-armed on degrade ----

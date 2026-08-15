@@ -129,8 +129,12 @@ export class RealNode implements UnderlyingNode {
 
   // Add a topic after the node is up (KYM refreshRoutes) — subscribe+channelCreate.
   async subscribe(topic: string): Promise<void> {
-    if (!this.ready) return;
-    if (!this.joinedTopics.has(topic)) await this.joinRoute(this.ctx, topic);
+    const isNew = !this.joinedTopics.has(topic);
+    // Remember the topic even when the node isn't settled yet, so the settle/reconnect path
+    // (subscribeContentTopic over joinedTopics) picks it up when the fleet comes back — otherwise
+    // a topic joined during a BLE-only start is lost on Waku forever.
+    this.joinedTopics.add(topic);
+    if (this.ready && isNew) await this.joinRoute(this.ctx, topic);
   }
 
   // liblogosdelivery exposes unsubscribe in the FFI but it is not yet bridged in Kotlin;
