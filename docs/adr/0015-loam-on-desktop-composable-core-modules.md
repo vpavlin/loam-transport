@@ -1,4 +1,4 @@
-# 15. Loam on desktop: composable logos-core modules (delivery + ble_mesh)
+# 15. Loam on desktop: a `loam_core` facade over composable bearer modules
 
 - **Status:** proposed — awaiting approval (design-first; no code until accepted)
 - **Date:** 2026-08-15
@@ -47,40 +47,51 @@ independently-reusable core modules, wired per app through the existing dependen
 
 ## Decision
 
-Adopt a **sibling-module fan-out** architecture on desktop. Concretely:
+Introduce a **`loam_core` facade module** that owns the transport layer and exposes ONE stable,
+bearer-agnostic API. Apps depend only on `loam_core`; `loam_core` depends on the bearer modules and
+fans out / dedups across them. This mirrors how loam-transport already works on mobile (a single
+transport facade over `WakuBearer` + `BleMeshBearer`; apps never touch a bearer directly).
 
 ### Modules and dependency edges
 
 ```
-        kym_core / scala / qaku_core          (app cores: identity, crypto, CRDT-fold, RBSR)
-              │  depends on
-      ┌───────┴────────┐
-      ▼                ▼
- delivery_module    ble_mesh                  (two peer bearers, each dependencies: [])
- (exists)           (NEW, reusable)
+        kym_core / scala / qaku_core              (app cores: identity, crypto, CRDT-fold, RBSR)
+              │  dependencies: ["loam_core"]        — the ONLY transport dep an app declares
+              ▼
+          loam_core                                (NEW facade: stable API + MultiBearer fan-out/dedup)
+              │  dependencies: ["delivery_module","ble_mesh", …future: "lora"…]
+      ┌───────┼─────────────┐
+      ▼       ▼             ▼
+ delivery   ble_mesh      lora …                   (bearer modules, each dependencies: [])
+ (exists)   (NEW)         (future)
 ```
 
-- **`delivery_module`** — unchanged. The Logos node + SDS reliable channels. `dependencies: []`.
-  No fork, no second node.
-- **`ble_mesh`** — **NEW standalone core module**, `dependencies: []`, reusable by any app. Owns
-  (a) a **Qt Bluetooth `MeshRadio`** and (b) the **portable gossip layer** (seen-set, hop-TTL,
-  store-carry-forward) ported from `bearer.ts`'s `BleMeshBearer` to C++. Public surface:
+- **`loam_core`** — **NEW facade module**. `dependencies` lists every bearer. It holds the C++
+  **MultiBearer** (the desktop mirror of `bearer.ts`): on send it fans the sealed frame to every
+  bearer; on receive it funnels all bearers into one **dedup'd** stream
+  (`frameId = sha256(topic‖0x00‖payload)[:16]`). It exposes the **stable transport API** apps
+  program against — roughly `start(cfg)/stop`, `join(topic)`, `sendSealed(topic, bytes)`, event
+  `received(topic, senderId, payload, ts)`, plus status (`peers()`, `meshPeers()`, per-bearer
+  health). Apps are **bearer-agnostic**: adding `lora` (or any bearer) is a `loam_core` change with
+  **zero app edits**. `loam_core` provides transport only — identity/crypto/CRDT stay in the app.
+- **`delivery_module`** — unchanged. Logos node + SDS reliable channels. `dependencies: []`. No
+  fork, no second node. `loam_core` maps its channel semantics (`channelCreate`/`channelSend`/
+  `channelMessageReceived`) onto the delivery bearer.
+- **`ble_mesh`** — **NEW bearer module**, `dependencies: []`, reusable directly too. Owns (a) a
+  **Qt Bluetooth `MeshRadio`** and (b) the **portable gossip layer** (seen-set, hop-TTL,
+  store-carry-forward) ported from `bearer.ts`'s `BleMeshBearer` to C++. Bearer surface:
   `start/stop`, `flood(topic, payload:bytes)`, `peers()/reachablePeers()`, event
   `frameReceived(topic, payload, ts)`. Declares Qt Bluetooth via `nix.cmake.find_packages`.
-- **App cores** — `dependencies: ["delivery_module", "ble_mesh"]`. On send, fan the sealed write
-  to **both** (`delivery.channelSend` **and** `ble_mesh.flood`); on receive, funnel **both**
-  `delivery.channelMessageReceived` and `ble_mesh.frameReceived` into one `ingestRaw`. **Dedup is
-  free**: logos-sync already converges by event id, and frames dedup by
-  `frameId = sha256(topic‖0x00‖payload)[:16]`, so the same bytes over Waku and BLE collapse to one.
+- **App cores** — `dependencies: ["loam_core"]`. Keep identity/crypto/CRDT-fold/RBSR on top of the
+  facade: call `loam_core.sendSealed`, consume `received`. **Dedup is free** (facade + event-id
+  convergence), so a write arriving over both Waku and BLE folds once.
 
-### The C++ MultiBearer seam (how apps avoid hand-wiring the fan-out)
+### Why the facade (not app-depends-on-bearers directly)
 
-Generalise scala's existing single-bearer `src/logos_transport.hpp` into a small C++ **MultiBearer**
-that holds a list of bearers (`delivery_module`, `ble_mesh`) behind one `send()/onReceive()` — the
-desktop mirror of `bearer.ts`. Ship it as a **vendored header first** (as scala already vendors
-`logos_transport.hpp` + `logos_sync/`), and promote it to its own module only if reuse demands.
-This keeps app cores unchanged except for adding `ble_mesh` to `dependencies` and constructing the
-bearer list.
+A stable `loam_core` API insulates every app from bearer churn: new bearers, mesh policy, dedup,
+and node lifecycle live in one place instead of being re-implemented per app. It is the exact
+desktop analog of the loam-transport lib's public surface — the same reason apps import
+`transport.*` on mobile rather than wiring Waku and BLE themselves.
 
 ### Desktop BLE radio = Qt Bluetooth
 
@@ -103,14 +114,19 @@ is later introduced. Until then, "caching" on desktop = the existing on-disk log
 ## Consequences
 
 - **Nothing forks delivery.** The node stays single-sourced; `ble_mesh` is additive and independently
-  useful. Any future app gets the mesh by adding one dependency.
-- **App-core change is minimal**: add `ble_mesh` to `dependencies`, construct the MultiBearer, done.
-  Fan-out/dedup is mechanical and already proven in the TS bearer.
+  useful. Bearers are pluggable behind `loam_core`.
+- **Stable app API; bearer churn is invisible.** Apps depend only on `loam_core` and program against
+  one transport surface. Adding a bearer (lora), changing mesh policy, or fixing dedup is a
+  `loam_core` change with **zero app edits** — the whole point of the facade.
+- **Cost: an extra IPC hop.** app → `loam_core` → `delivery`/`ble_mesh` is two Qt-Remote-Objects
+  hops instead of one. Manageable (the app→delivery pattern already works), but `loam_core` MUST
+  re-emit `received` on the right thread — QRO **drops cross-thread signal emits** (the known
+  cpp-sdk gotcha, fixed in d77c3dd); marshal received events onto the QRO thread before re-emitting.
 - **Two wire-compat seams to hold:** (1) `ble_mesh` ↔ Android Loam GATT/frame format (ADR 0014);
   (2) `delivery_module` channels ↔ mobile SDS (double-base64 framing, senderId, shard/topic) —
   already proven in kym/qaku.
-- New native surface (Qt Bluetooth + a C++ gossip port) is contained inside `ble_mesh`; app cores
-  and `delivery_module` are unaffected if BLE is absent (mesh simply reports 0 peers).
+- New native surface (Qt Bluetooth + a C++ gossip port) is contained inside `ble_mesh`; `loam_core`,
+  app cores, and `delivery_module` are unaffected if BLE is absent (mesh simply reports 0 peers).
 
 ## Risks / open questions
 
@@ -127,12 +143,15 @@ is later introduced. Until then, "caching" on desktop = the existing on-disk log
 
 ## Phased plan
 
-1. **C++ MultiBearer seam** — generalise `logos_transport.hpp` to a bearer list; route
-   kym_core/scala through it, delivery-only. No BLE; de-risks fan-out/dedup. Low risk.
+1. **`loam_core` facade, delivery-only** — new module wrapping just `delivery_module` behind the
+   stable API + a MultiBearer with one bearer. Switch kym_core/scala to `dependencies:["loam_core"]`
+   and route through it, unchanged behaviour. No BLE; de-risks the facade + the extra IPC hop +
+   the QRO re-emit thread handling. Low risk, and it's the seam everything else plugs into.
 2. **`ble_mesh` portable half** — port `BleMeshBearer` gossip + frame codec to C++ with a MockRadio
    and unit tests mirroring the TS suite. No hardware.
 3. **`ble_mesh` Qt Bluetooth radio** — (3a) prove peripheral advertising + central scan on desktop;
    (3b) desktop↔desktop mesh; (3c) desktop↔Android wire-compat. Resolve stable node-id here.
-4. **Wire app cores to both bearers** — verify convergence over BLE-only (internet off) and healing
-   to the fleet on reconnect.
+4. **Register `ble_mesh` under `loam_core`** — add it to `loam_core.dependencies` and the bearer
+   list; **app cores stay unchanged**. Verify convergence over BLE-only (internet off) and healing
+   to the fleet on reconnect. (Future bearers like `lora` join here the same way.)
 5. **(Deferred)** desktop broker/cache — only if a shared desktop node is introduced.
