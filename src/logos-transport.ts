@@ -112,7 +112,19 @@ export function payloadCandidates(payload: any): Uint8Array[] {
 let onReceiveCb: OnReceive | null = null;
 let preferService = false;
 let clientAppId = "app";
-export function preferServiceBackend(on: boolean, appId?: string) { preferService = on; if (appId) clientAppId = appId; }
+let started = false;
+export function preferServiceBackend(on: boolean, appId?: string) {
+  preferService = on; if (appId) clientAppId = appId;
+  // A pre-start diagnostic (e.g. a status widget's refreshPeerInfo) can call ensure() and wire
+  // the DEFAULT embedded backend before we know this preference — and ensure() is idempotent,
+  // so the shared node would never be used. If start() hasn't run yet, re-wire to match.
+  if (shared && !started) {
+    const wantService = on && ServiceNode.available();
+    if ((backend instanceof ServiceNode) !== wantService) {
+      wire(wantService ? new ServiceNode({ appId: clientAppId, counters, diag }) : makeReal());
+    }
+  }
+}
 
 let backend: RealNode | ServiceNode | null = null;
 let shared: SharedDeliveryNode | null = null;
@@ -228,6 +240,7 @@ export async function start(opts: { deviceId: string; topics: string[]; onReceiv
     } else { throw e; }
   }
   shared!._adopt("app", opts.topics);   // the single tenant owns the initial topics (no reliance on join())
+  started = true;                        // lock the backend choice; preferServiceBackend re-wires only pre-start
 }
 
 // Publish a sealed payload on a topic (RealNode double-base64s over SDS; ServiceNode forwards to the service).
