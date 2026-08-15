@@ -33,7 +33,9 @@ class LogosDeliveryClientModule(private val ctx: ReactApplicationContext) : Reac
   private fun emit(event: String) {
     try { ctx.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java).emit(event, null) } catch (_: Throwable) {}
   }
-  private fun intentFor() = Intent().apply { component = ComponentName("co.logos.delivery", "co.logos.delivery.svc.LogosDeliveryService") }
+  // The shared node is hosted by the Loam app (applicationId xyz.vpavlin.loam); the service
+  // CLASS kept the co.logos.delivery.svc namespace. Bind to that component explicitly.
+  private fun intentFor() = Intent().apply { component = ComponentName("xyz.vpavlin.loam", "co.logos.delivery.svc.LogosDeliveryService") }
 
   private val conn = object : ServiceConnection {
     override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -58,13 +60,13 @@ class LogosDeliveryClientModule(private val ctx: ReactApplicationContext) : Reac
 
   // Is the Logos Delivery app installed at all?
   @ReactMethod fun isInstalled(promise: Promise) {
-    promise.resolve(try { ctx.packageManager.getLaunchIntentForPackage("co.logos.delivery") != null } catch (_: Throwable) { false })
+    promise.resolve(try { ctx.packageManager.getLaunchIntentForPackage("xyz.vpavlin.loam") != null } catch (_: Throwable) { false })
   }
   // Bring Logos Delivery to the foreground so its node + foreground service start. Allowed
   // because qaku is itself in the foreground when it calls this (no background-launch limit).
   @ReactMethod fun launchService() {
     try {
-      val i = ctx.packageManager.getLaunchIntentForPackage("co.logos.delivery")
+      val i = ctx.packageManager.getLaunchIntentForPackage("xyz.vpavlin.loam")
       i?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); i?.let { ctx.startActivity(it) }
     } catch (_: Throwable) {}
   }

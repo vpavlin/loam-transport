@@ -59,8 +59,9 @@ const withPerms = (config) =>
     m.manifest.queries = m.manifest.queries || [{}];
     const q = m.manifest.queries[0];
     q["package"] = q["package"] || [];
-    if (!q["package"].find((p) => p.$ && p.$["android:name"] === "co.logos.delivery")) {
-      q["package"].push({ $: { "android:name": "co.logos.delivery" } });
+    // the Loam app hosts the shared node (applicationId xyz.vpavlin.loam)
+    if (!q["package"].find((p) => p.$ && p.$["android:name"] === "xyz.vpavlin.loam")) {
+      q["package"].push({ $: { "android:name": "xyz.vpavlin.loam" } });
     }
     return cfg;
   });
