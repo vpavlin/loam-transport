@@ -55,15 +55,18 @@ transport facade over `WakuBearer` + `BleMeshBearer`; apps never touch a bearer 
 ### Modules and dependency edges
 
 ```
-        kym_core / scala / qaku_core              (app cores: identity, crypto, CRDT-fold, RBSR)
-              │  dependencies: ["loam_core"]        — the ONLY transport dep an app declares
-              ▼
-          loam_core                                (NEW facade: stable API + MultiBearer fan-out/dedup)
-              │  dependencies: ["delivery_module","ble_mesh", …future: "lora"…]
-      ┌───────┼─────────────┐
-      ▼       ▼             ▼
- delivery   ble_mesh      lora …                   (bearer modules, each dependencies: [])
- (exists)   (NEW)         (future)
+   kym_core / scala / qaku_core            loam_ui                (QML view: metrics + control)
+        │ dependencies:["loam_core"]          │ logos.callModule("loam_core", …)
+        │  (only transport dep)               │ (control + metrics API)
+        └──────────────┬──────────────────────┘
+                       ▼
+                   loam_core                     (NEW facade: transport API + control/metrics API
+                       │                          + MultiBearer fan-out/dedup)
+                       │  dependencies: ["delivery_module","ble_mesh", …future: "lora"…]
+              ┌────────┼─────────────┐
+              ▼        ▼             ▼
+         delivery   ble_mesh      lora …          (bearer modules, each dependencies: [])
+         (exists)   (NEW)         (future)
 ```
 
 - **`loam_core`** — **NEW facade module**. `dependencies` lists every bearer. It holds the C++
@@ -85,6 +88,33 @@ transport facade over `WakuBearer` + `BleMeshBearer`; apps never touch a bearer 
 - **App cores** — `dependencies: ["loam_core"]`. Keep identity/crypto/CRDT-fold/RBSR on top of the
   facade: call `loam_core.sendSealed`, consume `received`. **Dedup is free** (facade + event-id
   convergence), so a write arriving over both Waku and BLE folds once.
+- **`loam_ui`** — **NEW reusable QML view module** for metrics + control, the desktop counterpart of
+  the mobile Loam app's panel + `LoamDebug`. Pure QML (no C++): it renders `loam_core`'s metrics and
+  drives its controls via `logos.callModule("loam_core", …)`. Droppable into Basecamp as its own
+  "Loam" control view, or embeddable in an app's settings. Because it's thin and API-driven, a new
+  bearer shows up in the UI automatically once `loam_core` reports it — no `loam_ui` change.
+
+### Control & metrics surface (what `loam_ui` drives)
+
+`loam_core`'s stable API is not only transport — it also exposes **control** and **metrics** so a UI
+(or an app) can steer the bearer set. This generalises the Android Loam app's controls (force-mesh,
+Core/Edge) to N bearers:
+
+- **Metrics** (poll or subscribe): overall `{ connected, peers }` plus a per-bearer list
+  `[{ name, enabled, priority, state, peers, rxN, txN, health }]` — e.g. delivery `{peers, mesh,
+  rx/tx}`, ble_mesh `{blePeers, bleTx/bleRx, armed}`. One shape so the UI renders any bearer
+  uniformly.
+- **Control:**
+  - `setBearerEnabled(name, on)` — turn a bearer off/on.
+  - `setBearerPriority(order[])` — the send/preference order (e.g. prefer delivery, BLE as
+    fallback; or cost-aware "don't flood BLE while Waku is healthy"). Fan-out-to-all stays the
+    resilient default; priority tunes it.
+  - **Force switches:** `forceMesh(on)` (arm BLE even with internet up, to test the mesh — the
+    existing Android toggle), `setNodeMode("Core"|"Edge")` (the delivery bearer's battery/relay
+    mode), and per-bearer force-on/off.
+- These live on `loam_core` (single source of truth); `loam_ui` is a thin renderer. Keeping control
+  in the facade means an app's own settings screen can offer the same knobs without reimplementing
+  them, and the mobile `LoamDebug`/status components map onto the same surface.
 
 ### Why the facade (not app-depends-on-bearers directly)
 
@@ -144,14 +174,19 @@ is later introduced. Until then, "caching" on desktop = the existing on-disk log
 ## Phased plan
 
 1. **`loam_core` facade, delivery-only** — new module wrapping just `delivery_module` behind the
-   stable API + a MultiBearer with one bearer. Switch kym_core/scala to `dependencies:["loam_core"]`
-   and route through it, unchanged behaviour. No BLE; de-risks the facade + the extra IPC hop +
-   the QRO re-emit thread handling. Low risk, and it's the seam everything else plugs into.
-2. **`ble_mesh` portable half** — port `BleMeshBearer` gossip + frame codec to C++ with a MockRadio
+   stable transport + control/metrics API + a MultiBearer with one bearer. Switch kym_core/scala to
+   `dependencies:["loam_core"]` and route through it, unchanged behaviour. No BLE; de-risks the
+   facade + the extra IPC hop + the QRO re-emit thread handling. Low risk, and it's the seam
+   everything else plugs into.
+2. **`loam_ui` view** — pure-QML metrics + control panel over `loam_core` (bearer list, force-mesh,
+   Core/Edge, enable/priority). Validates the control/metrics API early and gives an on-desktop
+   window into the transport. No hardware.
+3. **`ble_mesh` portable half** — port `BleMeshBearer` gossip + frame codec to C++ with a MockRadio
    and unit tests mirroring the TS suite. No hardware.
-3. **`ble_mesh` Qt Bluetooth radio** — (3a) prove peripheral advertising + central scan on desktop;
-   (3b) desktop↔desktop mesh; (3c) desktop↔Android wire-compat. Resolve stable node-id here.
-4. **Register `ble_mesh` under `loam_core`** — add it to `loam_core.dependencies` and the bearer
-   list; **app cores stay unchanged**. Verify convergence over BLE-only (internet off) and healing
-   to the fleet on reconnect. (Future bearers like `lora` join here the same way.)
-5. **(Deferred)** desktop broker/cache — only if a shared desktop node is introduced.
+4. **`ble_mesh` Qt Bluetooth radio** — (4a) prove peripheral advertising + central scan on desktop;
+   (4b) desktop↔desktop mesh; (4c) desktop↔Android wire-compat. Resolve stable node-id here.
+5. **Register `ble_mesh` under `loam_core`** — add it to `loam_core.dependencies` and the bearer
+   list; **app cores and `loam_ui` stay unchanged** (the new bearer just appears in metrics/control).
+   Verify convergence over BLE-only (internet off) and healing to the fleet on reconnect. (Future
+   bearers like `lora` join here the same way.)
+6. **(Deferred)** desktop broker/cache — only if a shared desktop node is introduced.
