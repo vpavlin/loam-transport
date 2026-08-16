@@ -164,8 +164,12 @@ export class RealNode implements UnderlyingNode {
   // the content topic reaches any LIVE subscriber immediately. payload = base64(sealed), ephemeral.
   async sendRaw(topic: string, sealed: Uint8Array): Promise<void> {
     if (!this.ready) throw new Error("node-null");
-    const b64 = fromByteArray(sealed);
-    await LogosMessaging.send(this.ctx, JSON.stringify({ contentTopic: topic, payload: b64, ephemeral: true }));
+    // Double-base64, EXACTLY like the channel send: the FFI base64-decodes `payload` once, so the wire
+    // payload = base64(sealed) — and a receiver (loam_core) then does its ONE b64-decode to get `sealed`
+    // (the app-core contract: "one decode; the app peels the last layer"). Single-b64 here would put the
+    // RAW bytes on the wire, and the receiver's decode would shred them.
+    const doubled = fromByteArray(utf8(fromByteArray(sealed)));
+    await LogosMessaging.send(this.ctx, JSON.stringify({ contentTopic: topic, payload: doubled, ephemeral: true }));
   }
 
   // KYM stopNode — best-effort; keeps didSetup so a restart is cheap.
