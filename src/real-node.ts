@@ -158,6 +158,16 @@ export class RealNode implements UnderlyingNode {
     }
   }
 
+  // Fire-and-forget RAW relay publish — NO SDS reliable channel. For diagnostics/telemetry, where
+  // ordering, retransmit and causal history are pure waste (and worse: a cold-joining collector can
+  // never resolve the SDS causal deps, so channel sends never deliver to it). A raw relay message on
+  // the content topic reaches any LIVE subscriber immediately. payload = base64(sealed), ephemeral.
+  async sendRaw(topic: string, sealed: Uint8Array): Promise<void> {
+    if (!this.ready) throw new Error("node-null");
+    const b64 = fromByteArray(sealed);
+    await LogosMessaging.send(this.ctx, JSON.stringify({ contentTopic: topic, payload: b64, ephemeral: true }));
+  }
+
   // KYM stopNode — best-effort; keeps didSetup so a restart is cheap.
   async stop(): Promise<void> {
     if (this.renewTimer) { clearInterval(this.renewTimer); this.renewTimer = null; }

@@ -291,6 +291,20 @@ export async function publishSealed(topic: string, sealed: Uint8Array): Promise<
   }
 }
 
+// Fire-and-forget RAW publish — NO SDS reliable channel. For diagnostics/telemetry: a cold-joining
+// collector can never resolve SDS causal deps (channel sends pile up "missing dependencies" and never
+// deliver), and reliability/ordering are waste here anyway. Uses the backend's raw relay when it has one
+// (RealNode.sendRaw), and still floods the mesh. Best-effort; never throws.
+export async function publishRaw(topic: string, sealed: Uint8Array): Promise<void> {
+  ensure();
+  if (mesh) { counters.bleTx++; noteTopic(meshTxTopics, topic); try { await mesh.send(makeFrame(topic, sealed)); } catch { /* */ } }
+  const b = backend as any;
+  try {
+    if (b && typeof b.sendRaw === "function") await b.sendRaw(topic, sealed);
+    else await backend!.send(topic, sealed);   // no raw path (e.g. ServiceNode) → fall back to the normal send
+  } catch { /* fire-and-forget */ }
+}
+
 // ---- BLE mesh bearer (ADR 0012) — TRANSPARENT, auto-armed on degrade ----
 // A second bearer beside Waku, and deliberately NOT an app feature. The node (this transport;
 // ultimately the shared delivery service, ADR 0010) owns the mesh. The app/service registers

@@ -15,7 +15,7 @@ import { hmac } from "@noble/hashes/hmac";
 import { sha256 } from "@noble/hashes/sha256";
 import { chacha20poly1305 } from "@noble/ciphers/chacha";
 import * as Crypto from "expo-crypto";
-import { counters, publishSealed, join, getNodeMode, meshEnabled, meshForcedOn, meshPeers } from "./logos-transport";
+import { counters, publishRaw, join, getNodeMode, meshEnabled, meshForcedOn, meshPeers } from "./logos-transport";
 
 const enc = (s: string) => new TextEncoder().encode(s);
 const HEXC = "0123456789abcdef";
@@ -96,7 +96,7 @@ export async function flush(): Promise<number> {
   let sent = 0;
   try {
     for (const s of pending) {
-      try { await publishSealed(topic, seal(enc(JSON.stringify(s)))); sent++; }
+      try { await publishRaw(topic, seal(enc(JSON.stringify(s)))); sent++; }
       catch (e: any) { lastError = String((e && e.message) || e); break; }
     }
   } finally {
