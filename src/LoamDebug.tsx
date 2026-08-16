@@ -12,7 +12,22 @@ import React, { useEffect, useState } from "react";
 import { View, Text, StyleSheet, TouchableOpacity, ScrollView } from "react-native";
 import * as t from "./logos-transport";
 
+// Optional clipboard — resolved at load so the shared component keeps zero HARD deps: if the
+// consuming app has expo-clipboard, the "copy" button appears; if not, rows stay long-press-copy.
+let Clipboard: any = null;
+try { Clipboard = require("expo-clipboard"); } catch { /* no clipboard in this app — degrade */ }
+
 type Rows = Record<string, string | number>;
+
+// Flatten the diagnostic sections into a paste-ready text block (for on-device bug reports).
+function dumpText(appName: string | undefined, sections: Array<[string, Rows]>): string {
+  const lines = [`🌱 loam debug${appName ? ` · ${appName}` : ""}  ${new Date().toISOString()}`];
+  for (const [name, rows] of sections) {
+    lines.push(`[${name}]`);
+    for (const [k, v] of Object.entries(rows)) lines.push(`  ${k}: ${String(v)}`);
+  }
+  return lines.join("\n");
+}
 
 export function LoamDebug({
   appName,
@@ -30,6 +45,7 @@ export function LoamDebug({
   const [open, setOpen] = useState(defaultOpen);
   const [, force] = useState(0);
   const [diag, setDiag] = useState("");
+  const [copied, setCopied] = useState(false);
   useEffect(() => {
     if (!open) return;
     let alive = true;
@@ -84,11 +100,18 @@ export function LoamDebug({
   try { ex = extra ? extra() : null; } catch { ex = null; }
   if (ex && Object.keys(ex).length) sections.push([`${appName || "app"} sync`, ex]);
 
+  const doCopy = async () => {
+    try { await Clipboard.setStringAsync(dumpText(appName, sections)); setCopied(true); setTimeout(() => setCopied(false), 1500); } catch { /* */ }
+  };
+
   return (
     <View style={[st.panel, style]}>
       <View style={st.head}>
         <Text style={st.title}>🌱 loam debug{appName ? ` · ${appName}` : ""}</Text>
-        <TouchableOpacity onPress={() => setOpen(false)}><Text style={st.close}>close ✕</Text></TouchableOpacity>
+        <View style={st.headBtns}>
+          {Clipboard ? <TouchableOpacity onPress={doCopy}><Text style={[st.close, copied && { color: C.green }]}>{copied ? "copied ✓" : "copy ⧉"}</Text></TouchableOpacity> : null}
+          <TouchableOpacity onPress={() => setOpen(false)}><Text style={st.close}>close ✕</Text></TouchableOpacity>
+        </View>
       </View>
       <ScrollView style={st.body} nestedScrollEnabled>
         {sections.map(([name, rows]) => (
@@ -115,6 +138,7 @@ const st = StyleSheet.create({
   tabT: { color: C.green, fontSize: 11, fontFamily: "monospace" },
   panel: { backgroundColor: C.surface, borderColor: C.green, borderWidth: 1, borderRadius: 12, overflow: "hidden", maxHeight: 340, width: "100%" },
   head: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 12, paddingVertical: 9, borderBottomColor: C.line, borderBottomWidth: 1 },
+  headBtns: { flexDirection: "row", alignItems: "center", gap: 14 },
   title: { color: C.green, fontSize: 12, fontFamily: "monospace", fontWeight: "700" },
   close: { color: C.faint, fontSize: 11, fontFamily: "monospace" },
   body: { paddingHorizontal: 12, paddingBottom: 8 },
