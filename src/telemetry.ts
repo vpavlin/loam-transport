@@ -53,8 +53,9 @@ function seal(plaintext: Uint8Array): Uint8Array {
 function snapshot(): Record<string, any> {
   const c = counters as any;
   return {
-    t: new Date().toISOString(), dev: deviceId,
-    peers: c.peers, mesh: c.mesh, rxRaw: c.rxRaw, mode: safe(getNodeMode),
+    t: new Date().toISOString(), dev: deviceId, src: "android",
+    peers: c.peers, mesh: c.mesh, rxRaw: c.rxRaw, rxNew: c.rxNew, rxOpenFail: c.rxOpenFail,
+    txTotal: c.txTotal, txFail: c.txFail, mode: safe(getNodeMode),
     bleTx: c.bleTx, bleRx: c.bleRx, bleDelivered: c.bleRxDelivered, bleDropped: c.bleRxDropped,
     armed: safe(meshEnabled), forced: safe(meshForcedOn), blePeers: safe(meshPeers),
   };
