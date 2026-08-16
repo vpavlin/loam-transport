@@ -226,8 +226,10 @@ export function unregisterClient(appId: string, opts?: { hard?: boolean }): Prom
 
 // Bring the node up (or, if up, join new topics), then record topic ownership so the
 // broker routes those topics to this app's tenant.
+let deviceId = "";   // remembered so the telemetry feature can stamp snapshots without app plumbing
 export async function start(opts: { deviceId: string; topics: string[]; onReceive: OnReceive; onStatus?: OnStatus }): Promise<void> {
   onReceiveCb = opts.onReceive;
+  deviceId = opts.deviceId;
   ensure();
   backend!.setDeviceId(opts.deviceId);
   try {
@@ -245,6 +247,22 @@ export async function start(opts: { deviceId: string; topics: string[]; onReceiv
   }
   shared!._adopt("app", opts.topics);   // the single tenant owns the initial topics (no reliance on join())
   started = true;                        // lock the backend choice; preferServiceBackend re-wires only pre-start
+}
+
+// ---- telemetry (offline-buffered node diagnostics) — a transport FEATURE, see ./telemetry.ts ----
+// enableTelemetry(secret) and the node buffers its own stats offline + flushes them to a sealed topic
+// when the fleet returns; any UI reads telemetryStatus(). Lazy-loaded so the pure core never pulls in
+// expo-*/@noble — call it after start() so the deviceId is known.
+let _tele: typeof import("./telemetry") | null = null;
+export async function enableTelemetry(secret: string, opts?: { everyMs?: number }): Promise<void> {
+  if (!secret) return;
+  if (!_tele) _tele = await import("./telemetry");
+  _tele.start(secret, { deviceId, everyMs: opts?.everyMs });
+}
+export function disableTelemetry(): void { try { _tele?.stop(); } catch { /* */ } }
+export function flushTelemetry(): Promise<number> { try { return _tele?.flush() ?? Promise.resolve(0); } catch { return Promise.resolve(0); } }
+export function telemetryStatus(): { enabled: boolean; topic?: string; buffered?: number; lastFlush?: string; lastError?: string } {
+  try { return _tele?.status() ?? { enabled: false }; } catch { return { enabled: false }; }
 }
 
 // Publish a sealed payload on a topic (RealNode double-base64s over SDS; ServiceNode forwards to the service).

@@ -7,7 +7,15 @@
   "peerDependencies": {
     "react-native": "*",
     "base64-js": "*",
-    "@noble/hashes": "*"
+    "@noble/hashes": "*",
+    "@noble/ciphers": "*",
+    "expo-crypto": "*",
+    "expo-file-system": "*"
+  },
+  "peerDependenciesMeta": {
+    "@noble/ciphers": { "optional": true },
+    "expo-crypto": { "optional": true },
+    "expo-file-system": { "optional": true }
   },
   "keywords": ["logos", "waku", "sds", "reliable-channels", "basecamp", "sync", "crdt", "expo"],
   "license": "MIT"

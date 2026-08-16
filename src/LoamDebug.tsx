@@ -96,6 +96,11 @@ export function LoamDebug({
       "ble tx": c.bleTx, "ble rx": c.bleRx,
     }],
   ];
+  const tele = safe(() => (t as any).telemetryStatus?.()) as any;
+  if (tele && tele.enabled) sections.push(["telemetry", {
+    buffered: tele.buffered, "last flush": tele.lastFlush || "—", "last err": tele.lastError || "—", topic: tele.topic || "—",
+  }]);
+
   let ex: Rows | null = null;
   try { ex = extra ? extra() : null; } catch { ex = null; }
   if (ex && Object.keys(ex).length) sections.push([`${appName || "app"} sync`, ex]);
