@@ -75,6 +75,16 @@ function metrics() {
   emit("loam_node_info", "node identity/labels", info);
   emit("loam_last_seen_seconds", "unix time of the last snapshot from this device", seen);
   emit("loam_up", "1 if a snapshot arrived in the last 120s", up);
+  // Auto-expose ANY other top-level numeric field (so a Basecamp publisher's bearer metrics land as
+  // gauges without hand-mapping): loam_x_<field>. Skips known gauges/bools + the label/meta fields.
+  const known = new Set([...Object.values(GAUGES), ...Object.values(BOOLS), "t", "dev", "src", "mode"]);
+  const extra = new Map(); // field -> rows
+  for (const [dev, { snap }] of latest) for (const [k, v] of Object.entries(snap)) {
+    if (known.has(k) || typeof v !== "number" || !isFinite(v)) continue;
+    const name = "loam_x_" + k.replace(/[^a-zA-Z0-9_]/g, "_");
+    (extra.get(name) || extra.set(name, []).get(name)).push(`${name}{dev="${esc(dev)}",src="${esc(snap.src || "?")}"} ${v}`);
+  }
+  for (const [name, rows] of extra) emit(name, "(auto)", rows);
   out.push(`# HELP loam_exporter_decoded_total telemetry snapshots decoded`, `# TYPE loam_exporter_decoded_total counter`, `loam_exporter_decoded_total ${decoded}`);
   return out.join("\n") + "\n";
 }
