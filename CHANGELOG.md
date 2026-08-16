@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.11.0 — 2026-08-16
+- **loam-telemetry as a transport feature (ADR 0016).** `enableTelemetry(secret)` and the node
+  self-drives: it buffers its OWN diagnostics offline (a bounded, disk-persisted ring pulled from
+  `counters` + bearer/mesh state) and flushes them to a sealed topic
+  (`/loam-telemetry/1/<hmac(K)[..16]>/proto`, chacha20poly1305; topic+key from the secret) the moment
+  the fleet is reachable. Idempotent + reconfigurable (Loam sets it at **runtime** from a persisted
+  secret; `EXPO_PUBLIC_TELEMETRY_SECRET` is a build-time fallback). Lazy-loaded via dynamic `import()`
+  so the pure core never gains `expo-*`/`@noble` — the crypto deps are **optional** peer-deps.
+  `telemetryStatus()`/`disableTelemetry()`/`flushTelemetry()` round out the API; `LoamDebug` shows a
+  telemetry section automatically.
+- **Observability pipeline (ADR 0016).** `tools/`: `loam-telemetry-exporter.mjs` decodes the sealed
+  stream and serves **Prometheus `/metrics`** labeled `dev`+`src` (android|basecamp) — Grafana compares
+  nodes/platforms; `loam-telemetry-publish.mjs` lets a Basecamp node publish via `loam_core.sendSealed()`
+  with no C++ crypto; `logos-hub telemetry` wires capture. `tools/README.md` documents it.
+- **Mock `MeshRadio` for headless bearer testing (ADR 0017).** `src/ws-mesh-radio.ts` implements the
+  `MeshRadio` seam over a WebSocket to `tools/mesh-relay.js`, so two nodes mesh with **zero Bluetooth**
+  (behind `EXPO_PUBLIC_MESH_WS_URL`). Proven: with the fleet bearer down, the transport runs entirely
+  over the mock bearer. `tools/fake-peer.ts` + `test/mesh-route.test.ts` (13/13 core tests green).
+- **`LoamDebug` copy button.** One tap copies every diagnostic section to the clipboard (optional
+  `expo-clipboard`, require-guarded) — no more retyping stats off a phone.
+- **Transport robustness.** A node-start failure no longer skips downstream setup (start wrapped so the
+  AIDL approval bridge + keepalive still run); `RealNode.subscribe` records topics joined offline so a
+  later settle re-subscribes them; a BLE-carried write is no longer re-queued on a Waku failure.
+
 ## 0.10.0 — 2026-08-15
 - **Renamed `logos-transport` → `loam-transport`.** Package name, README/HANDOVER
   titles, and repo URL (`github.com/vpavlin/loam-transport`) now use the Loam brand.

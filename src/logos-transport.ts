@@ -254,10 +254,12 @@ export async function start(opts: { deviceId: string; topics: string[]; onReceiv
 // when the fleet returns; any UI reads telemetryStatus(). Lazy-loaded so the pure core never pulls in
 // expo-*/@noble — call it after start() so the deviceId is known.
 let _tele: typeof import("./telemetry") | null = null;
+// Idempotent + reconfigurable: call with a new secret to restart telemetry on it; call with "" to turn
+// it off. Lets a UI toggle/secret-field drive it at runtime (not just the build-time env default).
 export async function enableTelemetry(secret: string, opts?: { everyMs?: number }): Promise<void> {
-  if (!secret) return;
   if (!_tele) _tele = await import("./telemetry");
-  _tele.start(secret, { deviceId, everyMs: opts?.everyMs });
+  _tele.stop();
+  if (secret) _tele.start(secret, { deviceId, everyMs: opts?.everyMs });
 }
 export function disableTelemetry(): void { try { _tele?.stop(); } catch { /* */ } }
 export function flushTelemetry(): Promise<number> { try { return _tele?.flush() ?? Promise.resolve(0); } catch { return Promise.resolve(0); } }

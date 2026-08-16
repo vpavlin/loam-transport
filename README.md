@@ -76,14 +76,31 @@ every bearer and funnels receives back in, deduped. You hand the transport a nat
 GATT radio **once** with `setMeshRadio(factory)`; it then **auto-arms** the mesh when
 peers appear. `forceMesh(true)` pins it on; `meshPeers()` reports reachable mesh
 peers. Desktop can act as a relay gateway (ADR 0013); connections are identity-first
-(ADR 0014).
+(ADR 0014). For **headless testing** of bearer switching (no Bluetooth), point the mesh
+at a mock radio with `EXPO_PUBLIC_MESH_WS_URL` — `src/ws-mesh-radio.ts` +
+`tools/mesh-relay.js` let two nodes mesh over WebSocket (ADR
+[0017](docs/adr/0017-mock-meshradio-headless-bearer-testing.md)).
+
+## Telemetry & observability
+
+`enableTelemetry(secret)` turns the node into its own diagnostics source (ADR
+[0016](docs/adr/0016-loam-telemetry-offline-buffered-observability.md)): it **buffers its
+own stats offline** and **flushes them, sealed, to a telemetry topic when the fleet
+returns** — so the offline bugs (the whole point of the mesh) become observable. It's
+opt-in, reconfigurable at runtime (a persisted secret; `EXPO_PUBLIC_TELEMETRY_SECRET`
+fallback), ciphertext-only, and **lazy-loaded** so the pure core stays dep-free.
+`telemetryStatus()` feeds any UI. The `tools/` pipeline decodes it into **Prometheus
+`/metrics`** (`loam-telemetry-exporter.mjs`), lets a Basecamp node publish
+(`loam-telemetry-publish.mjs`), and the hub captures it (`logos-hub telemetry`) — so
+Android and Basecamp nodes land side-by-side in Grafana. See [`tools/README.md`](tools/README.md).
 
 ## Shared-node UI components
 
 For apps that ride the device-wide shared node, the package ships ready-made React
 components so you don't hand-roll status UI: **`SharedNodeBanner`** (prompts to
 open/approve the shared service when it needs attention), **`SharedNodeStatus`** (live
-peers/mesh/approval state), and **`LoamDebug`** (a diagnostics panel). Import them from
+peers/mesh/approval state), and **`LoamDebug`** (a diagnostics panel with a one-tap
+**copy** button — grab all stats for a bug report without retyping). Import them from
 the package instead of writing your own banner.
 
 ---
