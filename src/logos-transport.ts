@@ -259,7 +259,7 @@ export async function publishSealed(topic: string, sealed: Uint8Array): Promise<
   // send stays AFTER and still throws on failure, so the caller's requeue-for-Waku logic
   // (retry when back online → the event still reaches the fleet/store) is preserved.
   let meshOk = false;
-  if (mesh) { counters.bleTx++; try { await mesh.send(makeFrame(topic, sealed)); meshOk = true; } catch { /* mesh is best-effort */ } }
+  if (mesh) { counters.bleTx++; noteTopic(meshTxTopics, topic); try { await mesh.send(makeFrame(topic, sealed)); meshOk = true; } catch { /* mesh is best-effort */ } }
   try {
     await backend!.send(topic, sealed);
   } catch (e) {
@@ -281,6 +281,30 @@ export async function publishSealed(topic: string, sealed: Uint8Array): Promise<
 // as Waku (the tenant opens the sealed bytes; sync dedups by event id), and sends fan to
 // whichever bearers are up — so BLE is invisible below the sync layer, by design.
 let mesh: BleMeshBearer | null = null;
+// ── mesh routing diagnostics ─────────────────────────────────────────────────
+// The BLE-vs-Waku "not treated equally" bug is a topic-match question: a frame only
+// delivers if its topic is in the broker's owners map. Record the last few topics we
+// FLOOD (tx), and the last few we DELIVER vs DROP on receive, plus the owned set — so a
+// glance shows whether the sender's topic matches what the receiver subscribed. Tails only
+// (topics are long); newest-first, deduped, capped.
+const meshTxTopics: string[] = [];
+const meshRxDeliv: string[] = [];
+const meshRxDrop: string[] = [];
+function topicTail(t: string): string { return t && t.length > 14 ? "…" + t.slice(-14) : t || "(empty)"; }
+function noteTopic(ring: string[], t: string): void {
+  const tail = topicTail(t);
+  const i = ring.indexOf(tail); if (i >= 0) ring.splice(i, 1);
+  ring.unshift(tail); while (ring.length > 4) ring.pop();
+}
+// Snapshot for a Debug panel: what we flood, what we own, what we deliver/drop over BLE.
+export function meshRouteDiag(): { tx: string[]; owned: string[]; deliv: string[]; drop: string[] } {
+  return {
+    tx: [...meshTxTopics],
+    owned: (shared ? shared.ownedTopics() : []).map(topicTail),
+    deliv: [...meshRxDeliv],
+    drop: [...meshRxDrop],
+  };
+}
 let meshRadioFactory: (() => MeshRadio) | null = null;
 let meshForced = false;
 let meshOpts: { ttl?: number } | undefined;
@@ -324,8 +348,8 @@ async function armMesh(): Promise<void> {
   m.onReceive((f) => {
     counters.rxRaw++; counters.bleRx++;
     const opened = shared ? shared._route(f.topic, [f.payload]) : false;
-    if (opened) { counters.rxNew++; counters.bleRxDelivered++; }
-    else { counters.rxDup++; counters.bleRxDropped++; }
+    if (opened) { counters.rxNew++; counters.bleRxDelivered++; noteTopic(meshRxDeliv, f.topic); }
+    else { counters.rxDup++; counters.bleRxDropped++; noteTopic(meshRxDrop, f.topic); }
   });
   try { await m.start(); mesh = m; } catch { /* radio not ready — retry next tick */ }
 }

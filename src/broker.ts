@@ -69,6 +69,10 @@ export class SharedDeliveryNode {
     }
   }
 
+  // The topics this device's broker currently routes (for diagnostics: does a BLE
+  // frame's topic match anything an app subscribed?).
+  ownedTopics(): string[] { return [...this.owners.keys()]; }
+
   // Returns true iff some owning tenant opened (decrypted) the message.
   _route(topic: string, payload: any): boolean {
     const set = this.owners.get(topic);
