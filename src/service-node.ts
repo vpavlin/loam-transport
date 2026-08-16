@@ -82,8 +82,14 @@ export class ServiceNode implements UnderlyingNode {
   }
 
   async subscribe(topic: string): Promise<void> {
-    if (!this.ready || this.joinedTopics.has(topic)) return;
-    await Client.subscribe(topic); this.joinedTopics.add(topic);
+    if (this.joinedTopics.has(topic)) return;
+    // Record the topic even BEFORE the shared node is ready, so the `logosDeliveryConnected`
+    // handler re-subscribes it on connect. The old `if (!this.ready) return` dropped an early
+    // subscribe AND never recorded it → an app that joined a room before its shared-node binding
+    // settled never registered that topic in the broker → its frames were silently dropped as
+    // "unowned" (the qaku-over-BLE "delivered:0" bug). Mirrors the RealNode.subscribe fix.
+    this.joinedTopics.add(topic);
+    if (this.ready) await Client.subscribe(topic);
   }
   async unsubscribe(_topic: string): Promise<void> { /* service-side; no per-topic unsub yet */ }
 
