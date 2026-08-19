@@ -109,6 +109,16 @@ export class ServiceNode implements UnderlyingNode {
 
   // Store history + live peer metrics belong to the service's node; not proxied yet.
   async storeSync(_onCandidates: (t: string, c: Uint8Array[]) => boolean): Promise<{ msgs: number; events: number; detail: string }> {
+    // On the shared node the store pull runs in the Loam service (which owns the node with the store
+    // query). We just TRIGGER it over AIDL; the pulled messages come back through the normal receive
+    // callback (the service dispatches them to us like live messages), which the app already folds —
+    // so _onCandidates isn't used on this path. Requires a Loam service that handles requestStoreSync.
+    if (!Client || typeof Client.requestStoreSync !== "function") {
+      this.storeInfo = "store: shared node has no store proxy (update Loam)";
+      return { msgs: 0, events: 0, detail: this.storeInfo };
+    }
+    try { Client.requestStoreSync(); } catch { /* */ }
+    this.storeInfo = "store: requested via shared node (history arrives on receive)";
     return { msgs: 0, events: 0, detail: this.storeInfo };
   }
   // Pull the shared node's live peers/mesh over AIDL so the app's status + the

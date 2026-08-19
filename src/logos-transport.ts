@@ -211,6 +211,11 @@ export function clientCacheInfo(appId: string): { cacheLimit: number; buffered: 
   ensure(); const t = shared!.tenants.get(appId);
   return t ? { cacheLimit: t.cacheLimit, buffered: t.buffered() } : { cacheLimit: 0, buffered: 0 };
 }
+// Cold-start history pull for one tenant (the shared-node side of storeSync) — run the node's store
+// query and route each stored message back to this tenant through the normal receive path.
+export function clientStoreSync(appId: string): Promise<{ msgs: number; events: number; detail: string }> {
+  ensure(); return shared!.clientStoreSync(appId);
+}
 export function clientSubscribe(appId: string, topic: string): Promise<void> {
   ensure(); const t = shared!.tenants.get(appId); return t ? t.subscribe(topic) : Promise.resolve();
 }
