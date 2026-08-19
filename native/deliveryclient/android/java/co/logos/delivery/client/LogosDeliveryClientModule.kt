@@ -82,6 +82,9 @@ class LogosDeliveryClientModule(private val ctx: ReactApplicationContext) : Reac
   @ReactMethod fun register(id: String) { appId = id; try { svc?.registerClient(id, callback) } catch (_: Throwable) {} }
   @ReactMethod fun subscribe(topic: String) { try { svc?.subscribe(appId, topic) } catch (_: Throwable) {} }
   @ReactMethod fun send(topic: String, sealedB64: String) { try { svc?.send(appId, topic, Base64.decode(sealedB64, Base64.NO_WRAP)) } catch (_: Throwable) {} }
+  // Fire-and-forget cold-start history pull — the service runs waku_store_query and pushes each
+  // stored message back through the receive callback. Requires a Loam service that handles it.
+  @ReactMethod fun requestStoreSync() { try { svc?.requestStoreSync(appId) } catch (_: Throwable) {} }
   @ReactMethod fun metrics(promise: Promise) { promise.resolve(try { svc?.metrics() ?: "{}" } catch (_: Throwable) { "{}" }) }
   @ReactMethod fun disconnect() { try { svc?.unregisterClient(appId); ctx.unbindService(conn) } catch (_: Throwable) {}; svc = null }
   @ReactMethod fun addListener(eventName: String) {}
