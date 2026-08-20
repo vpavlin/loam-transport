@@ -34,6 +34,13 @@ export class RealNode implements UnderlyingNode {
   private starting: Promise<void> | null = null;
   private listenerAttached = false;
   private renewTimer: ReturnType<typeof setInterval> | null = null;
+  // Peerless watchdog: peer-exchange can't recover from 0 peers (no peer to ask), and on mobile the
+  // mesh also drops on doze / wifi↔cellular handoff. Poll peers; re-dial if peerless after connecting.
+  private watchdogTimer: ReturnType<typeof setInterval> | null = null;
+  private everConnected = false;
+  private zeroPeerTicks = 0;
+  private lastReconnectMs = 0;
+  private reconnecting = false;
   private deviceId = "";
   private route: (topic: string, payload: any) => boolean = () => false;
   readonly joinedTopics = new Set<string>();   // KYM `routes`
@@ -122,6 +129,10 @@ export class RealNode implements UnderlyingNode {
         if (!this.ready) return;
         for (const t of this.joinedTopics) LogosMessaging.subscribeContentTopic(this.ctx, t).catch(() => { /* next tick retries */ });
       }, this.d.FILTER_RENEW_MS);
+      // Arm the peerless watchdog (self-polls, so it works even if the app never calls refreshPeerInfo).
+      this.everConnected = false; this.zeroPeerTicks = 0;
+      if (this.watchdogTimer) clearInterval(this.watchdogTimer);
+      this.watchdogTimer = setInterval(() => { this.peerWatchdog().catch(() => { /* */ }); }, 10000);
       step("Connected");
     })();
     try { await this.starting; } catch (e) { this.ready = false; throw e; } finally { this.starting = null; }
@@ -175,6 +186,7 @@ export class RealNode implements UnderlyingNode {
   // KYM stopNode — best-effort; keeps didSetup so a restart is cheap.
   async stop(): Promise<void> {
     if (this.renewTimer) { clearInterval(this.renewTimer); this.renewTimer = null; }
+    if (this.watchdogTimer) { clearInterval(this.watchdogTimer); this.watchdogTimer = null; }
     this.joinedTopics.clear();
     if (this.ready && LogosMessaging) {
       const c = this.ctx;
@@ -228,6 +240,36 @@ export class RealNode implements UnderlyingNode {
     }
     this.storeInfo = `store: ${totalMsgs} msg → ${totalEvents} ev  [${parts.join("  ")}]`;
     return { msgs: totalMsgs, events: totalEvents, detail: this.storeInfo };
+  }
+
+  // If the node was connected and then sits at 0 peers for ~30s, re-dial. PX can't bootstrap from 0.
+  private async peerWatchdog(): Promise<void> {
+    if (!this.ready || this.reconnecting) return;
+    await this.refreshPeerInfo();
+    const peers = this.d.counters.peers;
+    if (peers > 0) { this.everConnected = true; this.zeroPeerTicks = 0; return; }
+    if (peers === 0 && this.everConnected && ++this.zeroPeerTicks >= 3) {   // ~30s @ 10s poll
+      const now = Date.now();
+      if (now - this.lastReconnectMs > 45000) {                            // cooldown
+        this.lastReconnectMs = now; this.zeroPeerTicks = 0;
+        try { console.warn("[loam] mobile node peerless ~30s → re-dialing (PX can't recover from 0)"); } catch { /* */ }
+        await this.reconnect();
+      }
+    }
+  }
+
+  // Re-dial the fleet: stop → start (rebuilds the node from config's entryNodes) → re-join all topics.
+  async reconnect(): Promise<void> {
+    if (this.reconnecting) return;
+    this.reconnecting = true;
+    const topics = [...this.joinedTopics];
+    try {
+      try { if (this.ctx) await LogosMessaging.stop(this.ctx); } catch { /* already down */ }
+      this.ready = false;
+      this.joinedTopics.clear();     // start() re-joins from the topics we pass it
+      await this.start(topics);      // re-new + re-start + re-join + re-arm timers (didSetup stays true → cheap)
+    } catch { /* leave not-ready; the next watchdog tick retries */ }
+    finally { this.reconnecting = false; }
   }
 
   // KYM getPeerCount — sum ALL gossipsub-mesh gauges, parse shard(s), report peers/mesh.
