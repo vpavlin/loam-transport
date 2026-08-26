@@ -22,6 +22,7 @@ export class ServiceNode implements UnderlyingNode {
   private reconnectTimer: any = null;
   nodeDown = false;   // bound, but the service app's node/JS isn't running (no metrics)
   awaitingApproval = false;   // bound + node up, but this app hasn't been approved by the owner
+  private sawNodeUp = false;  // have we seen the shared node actually report health this session?
   readonly joinedTopics = new Set<string>();
   storeInfo = "store: via shared service";
 
@@ -56,7 +57,9 @@ export class ServiceNode implements UnderlyingNode {
       if (this.reconnectTimer) { clearInterval(this.reconnectTimer); this.reconnectTimer = null; }
     });
     emitter.addListener("logosDeliveryDisconnected", () => {
-      this.ready = false;
+      // The service went away -> the shared node is DOWN. Show "Loam isn't running" (not a stale
+      // "not approved"), and forget we ever saw it up so a fresh bind re-evaluates from scratch.
+      this.ready = false; this.nodeDown = true; this.awaitingApproval = false; this.sawNodeUp = false;
       if (!this.reconnectTimer) this.reconnectTimer = setInterval(() => { try { Client.reconnect(); } catch { /* */ } }, 3000);
     });
   }
@@ -118,13 +121,21 @@ export class ServiceNode implements UnderlyingNode {
     if (!this.ready || !this.counters || typeof Client.metrics !== "function") return;
     try {
       const m = JSON.parse(await Client.metrics());
-      if (m.authorized === false) {   // gated: not approved yet — reveal no health
+      if (m.authorized === false) {
+        // authorized:false is AMBIGUOUS. A genuinely-unapproved caller on a RUNNING node gets it,
+        // but so does a Loam that's bound yet whose node/JS hasn't primed the approved-apps list
+        // (a headless bind before the UI's preloadGrants ran also returns authorized:false). If we
+        // have NEVER seen this node actually report health this session, it's the latter -> show
+        // "Loam isn't running", not an approval problem. Only once we've seen the node up do we
+        // trust authorized:false as a real approval gate.
+        if (!this.sawNodeUp) { this.nodeDown = true; this.awaitingApproval = false;
+          this.counters.peers = -1; this.counters.mesh = -1; return; }
         this.awaitingApproval = true; this.nodeDown = false;
         this.counters.peers = -1; this.counters.mesh = -1; return;
       }
       this.awaitingApproval = false;
       this.nodeDown = typeof m.peers !== "number";   // bound but node/JS not reporting
-      if (typeof m.peers === "number") this.counters.peers = m.peers;
+      if (typeof m.peers === "number") { this.counters.peers = m.peers; this.sawNodeUp = true; }
       if (typeof m.mesh === "number") this.counters.mesh = m.mesh;
     } catch { this.nodeDown = true; }
   }
