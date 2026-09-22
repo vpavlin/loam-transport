@@ -162,6 +162,16 @@ export function usingServiceBackend(): boolean { return backend instanceof Servi
 export function serviceNodeDown(): boolean { return backend instanceof ServiceNode ? backend.isNodeDown() : false; }
 export function serviceAwaitingApproval(): boolean { return backend instanceof ServiceNode ? backend.isAwaitingApproval() : false; }
 export function launchSharedService(): void { if (backend instanceof ServiceNode) backend.launchService(); }
+// The silent peer-drop: the shared node is bound, running and approved, but reports ZERO fleet
+// peers — so nothing syncs, yet serviceNodeDown()/serviceAwaitingApproval() are both false and the
+// old banner stayed quiet. counters.peers is -1 until the node reports metrics (then the real count,
+// 0 if none), so key on an explicit 0. Callers should refreshDebug() first so peers is current.
+export function serviceNoPeers(): boolean {
+  return backend instanceof ServiceNode
+    && !backend.isNodeDown()
+    && !backend.isAwaitingApproval()
+    && counters.peers === 0;
+}
 // Explicit "why isn't the shared node being used" diagnostic — surfaced in-app for debugging.
 let lastServiceError = "";
 export async function serviceDiag(): Promise<string> {
