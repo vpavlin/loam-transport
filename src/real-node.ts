@@ -242,19 +242,22 @@ export class RealNode implements UnderlyingNode {
     return { msgs: totalMsgs, events: totalEvents, detail: this.storeInfo };
   }
 
-  // If the node was connected and then sits at 0 peers for ~30s, re-dial. PX can't bootstrap from 0.
+  // Sits at 0 peers → re-dial (PX can't bootstrap from 0). Re-dial WHETHER OR NOT we ever connected:
+  // a node that STARTED while offline (internet off at launch, then restored) never gets everConnected
+  // set, so gating on it left the node stuck at 0 peers forever with force-stop the only recovery.
+  // We just give the FIRST connect a longer grace (~60s) so a normal cold-start mesh isn't cut short;
+  // after we've ever connected, a drop re-dials at ~30s. Either way the 45s cooldown prevents thrash.
   private async peerWatchdog(): Promise<void> {
     if (!this.ready || this.reconnecting) return;
     await this.refreshPeerInfo();
     const peers = this.d.counters.peers;
     if (peers > 0) { this.everConnected = true; this.zeroPeerTicks = 0; return; }
-    if (peers === 0 && this.everConnected && ++this.zeroPeerTicks >= 3) {   // ~30s @ 10s poll
-      const now = Date.now();
-      if (now - this.lastReconnectMs > 45000) {                            // cooldown
-        this.lastReconnectMs = now; this.zeroPeerTicks = 0;
-        try { console.warn("[loam] mobile node peerless ~30s → re-dialing (PX can't recover from 0)"); } catch { /* */ }
-        await this.reconnect();
-      }
+    if (peers !== 0) return; // -1 = metrics not read yet; don't count it as peerless
+    const threshold = this.everConnected ? 3 : 6;   // ~30s after a drop, ~60s for the first connect
+    if (++this.zeroPeerTicks >= threshold && Date.now() - this.lastReconnectMs > 45000) {
+      this.lastReconnectMs = Date.now(); this.zeroPeerTicks = 0;
+      try { console.warn(`[loam] mobile node peerless ~${threshold * 10}s (everConnected=${this.everConnected}) → re-dialing`); } catch { /* */ }
+      await this.reconnect();
     }
   }
 
