@@ -119,6 +119,7 @@ export class ServiceNode implements UnderlyingNode {
   // embedded node. The service stays a blind pipe — this is only node health.
   async refreshPeerInfo(): Promise<void> {
     if (!this.ready || !this.counters || typeof Client.metrics !== "function") return;
+    const wasUp = this.sawNodeUp && !this.nodeDown; // was the shared node reporting health before this poll?
     try {
       const m = JSON.parse(await Client.metrics());
       if (m.authorized === false) {
@@ -137,6 +138,13 @@ export class ServiceNode implements UnderlyingNode {
       this.nodeDown = typeof m.peers !== "number";   // bound but node/JS not reporting
       if (typeof m.peers === "number") { this.counters.peers = m.peers; this.sawNodeUp = true; }
       if (typeof m.mesh === "number") this.counters.mesh = m.mesh;
+      // Loam's NODE just came up (e.g. Loam started AFTER Scala bound the AIDL service). The service
+      // stayed bound the whole time, so `logosDeliveryConnected` never fired and our topic subscribes —
+      // sent while the node was down — never reached a running node. Re-apply them now, or the app is
+      // "connected" but the node relays nothing → no sync. Mirrors the reconnect handler.
+      if (!this.nodeDown && !wasUp) {
+        for (const t of this.joinedTopics) { try { await Client.subscribe(t); } catch { /* */ } }
+      }
     } catch { this.nodeDown = true; }
   }
   isAwaitingApproval(): boolean { return this.awaitingApproval; }
