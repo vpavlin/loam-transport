@@ -1,4 +1,4 @@
-# 18. Shared-node cold-start history — proxy storeSync over AIDL
+# 21. Shared-node cold-start history — proxy storeSync over AIDL
 
 - **Status:** implemented (code, both repos); NOT device-verified — needs two phones on Loam
 - **Date:** 2026-08-19
