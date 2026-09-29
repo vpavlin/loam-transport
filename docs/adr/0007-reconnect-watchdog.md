@@ -46,3 +46,4 @@ conclude offline from one 0.")
 - Only a re-dial that actually dialed counts toward the backoff (45 s → 10 min). Offline skips don't, and a return to online resets it; the trail marks "offline" / "back online" once each.
 - A re-dial tries 2 random entry nodes with a 3 s timeout. `connect()` is a synchronous native call that holds the shared native-module thread.
 - A restart reuses the existing node context and never calls `new()` again.
+- The offline test is "a network that claims internet" (`NET_CAPABILITY_INTERNET`), not "validated". Validated is false behind a Wi-Fi login page, on some VPNs and on mesh networks, where the fleet can still be reachable.
