@@ -95,6 +95,10 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
   // completes -> nothing is ever received (the bleTx>0, bleRx=0 symptom).
   private val sendQ = ConcurrentHashMap<String, java.util.ArrayDeque<ByteArray>>()
   private val inFlight = ConcurrentHashMap<String, Boolean>()
+  private val inFlightSince = ConcurrentHashMap<String, Long>()
+  private val IN_FLIGHT_TIMEOUT_MS = 5000L   // a completion callback that never comes must not wedge the link
+  private val MAX_QUEUE_FRAMES = 1500        // refuse new messages past this backlog instead of growing forever
+  private val setupDone = ConcurrentHashMap<String, Boolean>()   // client link finished MTU → discover → CCCD
   // on-screen diagnostics (surfaced via stats(); no adb needed)
   @Volatile private var stFragSent = 0
   @Volatile private var stWriteOk = 0
@@ -132,7 +136,16 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
   private val announceRetry = object : Runnable {
     override fun run() {
       if (wireId.isNotEmpty()) try {
+        val now = System.currentTimeMillis()
+        for ((addr, since) in inFlightSince) {
+          if (inFlight[addr] == true && now - since > IN_FLIGHT_TIMEOUT_MS) {
+            inFlight[addr] = false; inFlightSince.remove(addr); stWriteFail++; stLastErr = "send timeout"
+            pump(addr)
+          }
+        }
         for (addr in (clientGatts.keys + serverDevices.keys).toSet()) {
+          // A client link still in setup has a GATT op in flight: a Q now would collide with it.
+          if (clientGatts.containsKey(addr) && setupDone[addr] != true && !serverDevices.containsKey(addr)) continue
           if (addrToNode.containsKey(addr)) { announceTries.remove(addr); continue }  // peer known on this link
           val n = announceTries[addr] ?: 0
           if (n < ANNOUNCE_MAX_TRIES) { announceTries[addr] = n + 1; sendAnnounce(addr, askBack = true) }
@@ -188,7 +201,7 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
     gattServer = null
     clientGatts.clear(); serverDevices.clear(); mtu.clear(); connecting.clear()
     discovered.clear(); announceTries.clear()
-    inFlight.clear(); sendQ.clear(); addrToNode.clear(); nodeToAddrs.clear()
+    inFlight.clear(); inFlightSince.clear(); setupDone.clear(); sendQ.clear(); addrToNode.clear(); nodeToAddrs.clear()
     reasm.clear(); reasmCount.clear(); reasmTime.clear()
   }
 
@@ -224,37 +237,45 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
   // Last crash report for on-screen display: the JVM/JS crash file the app's uncaught handler writes
   // (loam-last-crash.txt), plus Android's own record of recent process exits (API 30+), which also
   // covers native crashes and ANRs the JVM handler never sees.
+  // Crash report for on-screen display — "" unless there's a crash the user hasn't dismissed yet.
+  // Sources: the JVM/JS crash file the app's uncaught handler writes (loam-last-crash.txt), and
+  // Android's record of process exits (API 30+) filtered to real crashes (JVM crash, native crash,
+  // ANR, or killed by a fatal signal) newer than the last dismiss. The previous run's breadcrumb
+  // trail is attached for context. Each section is truncated on its own, head first.
+  private val crashPrefs by lazy { ctx.getSharedPreferences("loam-crash", Context.MODE_PRIVATE) }
   @ReactMethod fun lastCrash(promise: Promise) {
+    val seen = crashPrefs.getLong("seenTs", 0L)
     val sb = StringBuilder()
+    var crashed = false
     try {
       val f = java.io.File(ctx.filesDir, "loam-last-crash.txt")
-      if (f.exists()) sb.append("JVM crash:\n").append(f.readText()).append("\n")
+      if (f.exists()) { crashed = true; sb.append("JVM crash:\n").append(f.readText().take(4000)).append("\n") }
     } catch (_: Exception) {}
     try {
       if (Build.VERSION.SDK_INT >= 30) {
         val am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
-        for (x in am.getHistoricalProcessExitReasons(ctx.packageName, 0, 4)) {
+        for (x in am.getHistoricalProcessExitReasons(ctx.packageName, 0, 6)) {
+          if (x.timestamp <= seen) continue
+          val fatalSignal = x.reason == android.app.ApplicationExitInfo.REASON_SIGNALED && x.status in setOf(4, 6, 7, 8, 11)
+          val crash = fatalSignal || x.reason == android.app.ApplicationExitInfo.REASON_CRASH ||
+            x.reason == android.app.ApplicationExitInfo.REASON_CRASH_NATIVE || x.reason == android.app.ApplicationExitInfo.REASON_ANR
+          if (!crash) continue
+          crashed = true
           sb.append("exit ${java.util.Date(x.timestamp)} proc=${x.processName} reason=${x.reason} status=${x.status} ${x.description ?: ""}\n")
-          val native = x.reason == android.app.ApplicationExitInfo.REASON_CRASH_NATIVE || x.reason == android.app.ApplicationExitInfo.REASON_ANR
-          if (native) try {
-            x.traceInputStream?.use { ins ->
-              val head = ins.bufferedReader().lineSequence().take(60).joinToString("\n")
-              sb.append(head).append("\n")
-            }
+          // ANR traces are text. Native-crash traces (API 31+) are binary tombstones that can include raw
+          // memory, so they are never shown or copied.
+          if (x.reason == android.app.ApplicationExitInfo.REASON_ANR) try {
+            x.traceInputStream?.use { ins -> sb.append(ins.bufferedReader().lineSequence().take(40).joinToString("\n") { it.take(200) }).append("\n") }
           } catch (_: Exception) {}
         }
       }
     } catch (e: Exception) { sb.append("exit info unavailable: ${e.message}\n") }
-    try {
-      val e = java.io.File(ctx.filesDir, "loam-stderr-prev.txt")
-      if (e.exists() && e.length() > 0) sb.append("previous run, native stderr (last 40 lines):\n").append(e.readText().lines().takeLast(40).joinToString("\n")).append("\n")
-    } catch (_: Exception) {}
+    if (!crashed) { promise.resolve(""); return }
     try {
       val f = java.io.File(ctx.filesDir, "loam-trail-prev.txt")
-      if (f.exists()) sb.append("previous run, last steps:\n").append(f.readText().lines().takeLast(40).joinToString("\n")).append("\n")
+      if (f.exists()) sb.append("previous run, last steps:\n").append(f.readText().lines().takeLast(40).joinToString("\n") { it.take(200) }).append("\n")
     } catch (_: Exception) {}
-    val out = sb.toString()
-    promise.resolve(if (out.length > 14000) out.takeLast(14000) else out)
+    promise.resolve(sb.toString().take(16000))
   }
 
   // Does Android see a network with VALIDATED internet? The node re-dial is skipped when not: dialing
@@ -267,7 +288,9 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
     } catch (_: Exception) { promise.resolve(true) }   // unknown: behave as before
   }
 
+  // Dismiss: hide everything up to now (exits are Android's record, so remember a timestamp).
   @ReactMethod fun clearCrash(promise: Promise) {
+    try { crashPrefs.edit().putLong("seenTs", System.currentTimeMillis()).apply() } catch (_: Exception) {}
     try { java.io.File(ctx.filesDir, "loam-last-crash.txt").delete() } catch (_: Exception) {}
     promise.resolve(true)
   }
@@ -332,9 +355,9 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
       Log.d(TAG, "server<-write ${device.address} ${value.size}B match=${ch.uuid == CHAR_UUID} prepared=$preparedWrite")
       // Frames are sized to fit one write; a prepared (long) write would arrive as unrelated chunks
       // and needs onExecuteWrite, which we don't implement. Refuse it rather than corrupt a frame.
-      if (preparedWrite) { if (responseNeeded) gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED, offset, null); return }
+      if (preparedWrite) { if (responseNeeded) try { gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED, offset, null) } catch (_: Exception) {}; return }
       if (ch.uuid == CHAR_UUID) onFragment(device.address, value)
-      if (responseNeeded) gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+      if (responseNeeded) try { gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null) } catch (_: Exception) {}
     }
     // A central enabling notifications writes our CCCD. If we never answer, the client's
     // writeDescriptor never completes and notifications stay OFF — the server->central
@@ -344,13 +367,14 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
       preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray,
     ) {
       Log.d(TAG, "server<-cccd ${device.address} (notify enable)")
-      if (responseNeeded) gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+      if (responseNeeded) try { gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null) } catch (_: Exception) {}
       sendAnnounce(device.address)   // central can now receive notifications → tell it who we are
     }
     override fun onMtuChanged(device: BluetoothDevice, m: Int) { mtu[device.address] = m }
     // A notification finished sending — send the next queued fragment to this central.
     override fun onNotificationSent(device: BluetoothDevice, status: Int) {
       if (status != BluetoothGatt.GATT_SUCCESS) { stWriteOk--; stWriteFail++; stLastErr = "notify status $status" }
+      inFlightSince.remove(device.address)
       inFlight[device.address] = false
       pump(device.address)
     }
@@ -394,8 +418,10 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
       Log.d(TAG, "scan saw $addr — dialing")
       connecting[addr] = true
       // TRANSPORT_LE: without it dual-mode phones may try BR/EDR and fail with status 133.
-      if (Build.VERSION.SDK_INT >= 23) dev.connectGatt(ctx, false, clientCallback, BluetoothDevice.TRANSPORT_LE)
-      else dev.connectGatt(ctx, false, clientCallback)
+      try {
+        if (Build.VERSION.SDK_INT >= 23) dev.connectGatt(ctx, false, clientCallback, BluetoothDevice.TRANSPORT_LE)
+        else dev.connectGatt(ctx, false, clientCallback)
+      } catch (e: Exception) { connecting.remove(addr); stLastErr = "connect threw"; Log.e(TAG, "connectGatt $addr threw", e) }
     }
   }
   private val clientCallback = object : BluetoothGattCallback() {
@@ -429,15 +455,15 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
       // disconnect so the scanner re-dials, instead of keeping a link that can never carry data.
       if (ch == null) { Log.e(TAG, "client services $addr status=$status — Loam char NOT FOUND"); dropLink(addr, "no Loam char"); return }
       Log.d(TAG, "client services $addr — enabling notify")
-      gatt.setCharacteristicNotification(ch, true)
+      try { gatt.setCharacteristicNotification(ch, true) } catch (e: Exception) { dropLink(addr, "notify setup threw"); return }
       // Enable notifications by writing the CCCD. That write is now the in-flight GATT op, so we
       // must NOT send the announce here — doing so collided with this write and the announce was
       // dropped (the root cause). The announce is sent in onDescriptorWrite once this completes.
       // Fallback: if the CCCD write can't even be queued (or there's no CCCD), announce directly.
       val cccd = ch.getDescriptor(CCCD_UUID)
-      val queued = cccd?.let { it.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE; gatt.writeDescriptor(it) } ?: false
+      val queued = try { cccd?.let { it.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE; gatt.writeDescriptor(it) } ?: false } catch (_: Exception) { false }
       emitPeers() // link usable now
-      if (!queued) { Log.d(TAG, "cccd not queued for $addr — announcing directly"); sendAnnounce(addr) }
+      if (!queued) { Log.d(TAG, "cccd not queued for $addr — announcing directly"); setupDone[addr] = true; sendAnnounce(addr) }
     }
     // CCCD write finished: notifications are on AND the link is free — NOW announce our identity.
     // (Announcing before this completed is exactly what dropped the frame — one GATT op per link.)
@@ -445,6 +471,7 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
       if (descriptor.uuid == CCCD_UUID) {
         // Ask for a short connection interval: the default balanced one caps a write-with-response
         // link at a few KB/s, which a catch-up burst saturates. Not a queued GATT op, so no collision.
+        setupDone[gatt.device.address] = true
         try { gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH) } catch (_: Exception) {}
         Log.d(TAG, "client cccd written ${gatt.device.address} status=$status — announcing")
         sendAnnounce(gatt.device.address)
@@ -466,6 +493,7 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
     override fun onCharacteristicWrite(gatt: BluetoothGatt, ch: BluetoothGattCharacteristic, status: Int) {
       // The peer can still reject a write we queued fine (e.g. too long): count it, don't call it sent.
       if (status != BluetoothGatt.GATT_SUCCESS) { stWriteOk--; stWriteFail++; stLastErr = "write status $status" }
+      inFlightSince.remove(gatt.device.address)
       inFlight[gatt.device.address] = false
       pump(gatt.device.address)
     }
@@ -479,7 +507,7 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
     if (clientGatts[addr] !== gatt) return           // stale/closed link
     if (discovered.put(addr, true) == true) return   // already discovering
     Log.d(TAG, "discoverServices $addr")
-    gatt.discoverServices()
+    try { if (!gatt.discoverServices()) dropLink(addr, "discover not started") } catch (e: Exception) { Log.e(TAG, "discoverServices $addr threw", e); dropLink(addr, "discover threw") }
   }
 
   // ── fragmentation ───────────────────────────────────────────────────────────
@@ -493,8 +521,11 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
     if (count > 255) {   // idx/count are one byte each; more would silently wrap and corrupt reassembly
       stLastErr = "too big ${bytes.size}B"; Log.e(TAG, "sendFragments $addr ${bytes.size}B needs $count frags (max 255) — dropped"); return
     }
-    val id = (msgSeq++ and 0xffff)
     val q = sendQ.getOrPut(addr) { java.util.ArrayDeque() }
+    if (synchronized(q) { q.size } + count > MAX_QUEUE_FRAMES) {
+      stLastErr = "queue full"; Log.e(TAG, "sendFragments $addr backlog full — message dropped"); return
+    }
+    val id = (msgSeq++ and 0xffff)
     var off = 0
     for (idx in 0 until count) {
       val end = (off + cap).coerceAtMost(bytes.size)
@@ -521,6 +552,7 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
         frame = q.pollFirst()
         if (frame == null) return
         inFlight[peer] = true
+        inFlightSince[peer] = System.currentTimeMillis()
       }
       stFragSent++
       val ok = writeToPeer(peer, frame!!)
@@ -613,6 +645,10 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
 
   // A link to `addr` is gone — forget its identity mapping, queue, mtu, and reasm buffers.
   private fun forgetAddr(addr: String) {
+    // One role of a dual-role link went away, but the other (client or server) to the same address is still
+    // up: keep its identity, MTU and queue. Wiping them dropped the fragment cap to 15 B for good.
+    if (clientGatts.containsKey(addr) || serverDevices.containsKey(addr)) { inFlight[addr] = false; inFlightSince.remove(addr); pump(addr); return }
+    setupDone.remove(addr); inFlightSince.remove(addr)
     addrToNode.remove(addr)?.let { node -> nodeToAddrs[node]?.let { it.remove(addr); if (it.isEmpty()) nodeToAddrs.remove(node) } }
     inFlight.remove(addr); sendQ.remove(addr); mtu.remove(addr); discovered.remove(addr); announceTries.remove(addr)
     for (k in reasm.keys.filter { it.startsWith("$addr/") }) { reasm.remove(k); reasmCount.remove(k); reasmTime.remove(k) }

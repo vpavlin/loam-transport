@@ -41,3 +41,8 @@ conclude offline from one 0.")
   mesh (0012/0019) carries the traffic.
 - **Correction to "Consequences":** sync survives network changes *once the internet is back*. While
   offline, the watchdog deliberately does nothing.
+
+**Review follow-up (2026-09-29):**
+- Only a re-dial that actually dialed counts toward the backoff (45 s → 10 min). Offline skips don't, and a return to online resets it; the trail marks "offline" / "back online" once each.
+- A re-dial tries 2 random entry nodes with a 3 s timeout. `connect()` is a synchronous native call that holds the shared native-module thread.
+- A restart reuses the existing node context and never calls `new()` again.

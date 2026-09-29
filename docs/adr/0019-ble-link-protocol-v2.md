@@ -99,3 +99,10 @@ Every GATT write or notify carries exactly one frame. The first byte is its type
 - **No carry-forward outbox.** A message sent with nobody in range is not kept for later; the app's
   catch-up covers it.
 - **Android < 12 needs location permission** for scanning, and Loam doesn't request it.
+
+## Review follow-up (2026-09-29)
+
+- **Per-link state is role-aware.** When one role of a dual-role link (client or server) disconnects while the other is still up, the address keeps its identity, MTU and queue. Wiping them had dropped the fragment cap to 15 B for good.
+- **A send whose completion never arrives times out after 5 s** (`err=send timeout`), so it can't wedge a link. A link refuses new messages beyond a 1500-frame backlog (`err=queue full`).
+- **No `Q` goes out on a client link still in setup,** because it would collide with the in-flight GATT operation.
+- **Every radio call made from a callback or timer is wrapped:** discover, notification setup, `connectGatt`, `sendResponse`, write and notify. A failure drops the link instead of throwing.

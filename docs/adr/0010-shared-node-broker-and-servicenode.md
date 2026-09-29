@@ -48,3 +48,7 @@ down, apps fall back to an embedded node (`serviceNodeDown()` / `launchSharedSer
   when the Loam UI opens. Clients look connected, their requests are buffered until `jsReady`, and nothing
   syncs until someone opens Loam. The planned fix is to boot the node headlessly (a `boot()` shared by the
   UI and a headless task that the service starts).
+
+**Review follow-up (2026-09-29):**
+- `RealNode.joinedTopics` holds only topics whose subscribe + channelCreate succeeded.
+- Topics requested before the node is ready, or whose join failed, sit in `pendingTopics`. They are joined right after settle and retried on every renew tick, so the broker's `nodeSubPending` retry and start-up joins actually take effect.
