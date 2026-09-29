@@ -158,3 +158,46 @@ test("MultiBearer does not re-funnel a frame it originated (echo suppression)", 
   ble.inject(f);             // a neighbour floods it back to us
   assert.equal(up.length, 0, "our own origination isn't delivered back up");
 });
+
+// ── re-sends (sync retries and catch-up re-send events byte-identically) ─────
+test("a re-sent frame reaches a neighbour that appeared after the first send", async () => {
+  const mesh = new MockMesh();
+  const a = await node(mesh, "A"), b = await node(mesh, "B");
+  const f = makeFrame("t", P("event-1"));
+  await a.bearer.send(f);                 // nobody nearby yet
+  assert.strictEqual(b.rx.length, 0);
+  mesh.connect("A", "B");
+  await a.bearer.send(f);                 // the app retries once a peer shows up
+  assert.deepStrictEqual(b.ids(), [f.id]);
+});
+
+test("a phone can re-send a frame it received to a newcomer (catch-up)", async () => {
+  const mesh = new MockMesh();
+  const a = await node(mesh, "A"), b = await node(mesh, "B"), c = await node(mesh, "C");
+  mesh.connect("A", "B");
+  const f = makeFrame("t", P("event-1"));
+  await a.bearer.send(f);
+  assert.deepStrictEqual(b.ids(), [f.id]);
+  mesh.connect("B", "C");                 // C walks up later and asks; B answers with the same bytes
+  await b.bearer.send(f);
+  assert.deepStrictEqual(c.ids(), [f.id]);
+  assert.strictEqual(a.rx.length, 0);     // A's own frame echoed back is still suppressed
+});
+
+test("loops die within the seen window; after it expires the frame can flood again", async () => {
+  const mesh = new MockMesh();
+  let t = 0;
+  const mk = async (id: string) => {
+    const bearer = new BleMeshBearer(new MockRadio(mesh, id), { ttl: 6, seenWindowMs: 30_000, now: () => t });
+    const rx: Frame[] = []; bearer.onReceive((f) => rx.push(f)); await bearer.start();
+    return { bearer, rx };
+  };
+  const a = await mk("A"), b = await mk("B"), c = await mk("C");
+  mesh.connect("A", "B"); mesh.connect("B", "C"); mesh.connect("C", "A");
+  const f = makeFrame("t", P("x"));
+  await a.bearer.send(f);
+  assert.strictEqual(b.rx.length, 1); assert.strictEqual(c.rx.length, 1);  // cycle: still once each
+  t += 31_000;
+  await a.bearer.send(f);                 // e.g. a catch-up re-send a minute later
+  assert.strictEqual(b.rx.length, 2); assert.strictEqual(c.rx.length, 2);  // delivered again, once each
+});
