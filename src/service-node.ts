@@ -132,9 +132,9 @@ export class ServiceNode implements UnderlyingNode {
         // "Loam isn't running", not an approval problem. Only once we've seen the node up do we
         // trust authorized:false as a real approval gate.
         if (!this.sawNodeUp) { this.nodeDown = true; this.awaitingApproval = false;
-          this.counters.peers = -1; this.counters.mesh = -1; return; }
+          this.counters.peers = -1; this.counters.mesh = -1; this.blePeers = 0; return; }
         this.awaitingApproval = true; this.nodeDown = false;
-        this.counters.peers = -1; this.counters.mesh = -1; return;
+        this.counters.peers = -1; this.counters.mesh = -1; this.blePeers = 0; return;
       }
       this.awaitingApproval = false;
       this.nodeDown = typeof m.peers !== "number";   // bound but node/JS not reporting
@@ -157,7 +157,7 @@ export class ServiceNode implements UnderlyingNode {
       if (!this.nodeDown && !wasUp) {
         for (const t of this.joinedTopics) { try { await Client.subscribe(t); } catch { /* */ } }
       }
-    } catch { this.nodeDown = true; }
+    } catch { this.nodeDown = true; this.blePeers = 0; }
   }
   isAwaitingApproval(): boolean { return this.awaitingApproval; }
   async stop(): Promise<void> { this.ready = false; try { await Client.disconnect?.(); } catch { /* */ } }
