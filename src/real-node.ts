@@ -26,6 +26,9 @@ export interface RealNodeDeps {
   STORE_MAX_PAGES: number;
 }
 
+// Debug breadcrumb (Loam sets globalThis.__loamMark → a crash-surviving native trail file).
+const mark = (s: string) => { try { (globalThis as any).__loamMark?.(s); } catch { /* */ } };
+
 export class RealNode implements UnderlyingNode {
   private d: RealNodeDeps;
   private didSetup = false;
@@ -41,7 +44,6 @@ export class RealNode implements UnderlyingNode {
   private zeroPeerTicks = 0;
   private lastReconnectMs = 0;
   private reconnecting = false;
-  private reconnectFailed = false;   // last re-dial threw; the watchdog keeps retrying
   private deviceId = "";
   private route: (topic: string, payload: any) => boolean = () => false;
   readonly joinedTopics = new Set<string>();   // KYM `routes`
@@ -115,10 +117,13 @@ export class RealNode implements UnderlyingNode {
       if (!this.didSetup) { await LogosMessaging.setup(); this.didSetup = true; }
       const config = this.d.buildConfig();
       step("mode:" + (config && config.mode));
+      mark("node new mode=" + (config && config.mode));
       const c: string = await LogosMessaging.new(config);
+      mark("node new ok ctx=" + String(c).slice(-6));
       this.ctx = c;
       step("Joining mesh…");
       await LogosMessaging.start(c);
+      mark("node started");
       // Subscribe + channelCreate every topic BEFORE the settle, so the mesh forms with
       // the channel/subscription already wired in (KYM's order — the bit I'd gotten wrong).
       for (const t of initialTopics) await this.joinRoute(c, t);
@@ -192,6 +197,7 @@ export class RealNode implements UnderlyingNode {
     if (this.ready && LogosMessaging) {
       const c = this.ctx;
       this.ready = false;
+      mark("node stop");
       try { await LogosMessaging.stop(c); } catch { /* ignore */ }
     }
   }
@@ -199,6 +205,7 @@ export class RealNode implements UnderlyingNode {
   // KYM storeSync — cursor-paged history pull over EVERY joined topic. Hands each stored
   // message's candidates to the app (which opens+folds) and returns {msgs, events, detail}.
   async storeSync(onCandidates: (topic: string, candidates: Uint8Array[]) => boolean): Promise<{ msgs: number; events: number; detail: string }> {
+    mark(`storeSync topics=${this.joinedTopics.size}`);
     if (!this.ready || typeof LogosMessaging.storeQuery !== "function") {
       this.storeInfo = "store: bridge missing (rebuild app)";
       return { msgs: 0, events: 0, detail: this.storeInfo };
@@ -250,13 +257,7 @@ export class RealNode implements UnderlyingNode {
   // after we've ever connected, a drop re-dials at ~30s. Either way the 45s cooldown prevents thrash.
   private async peerWatchdog(): Promise<void> {
     if (this.reconnecting) return;
-    // A failed re-dial leaves the node not-ready. Without this the watchdog returned early on every
-    // tick from then on, so a node that failed to restart while offline never came back when the
-    // internet did. Keep retrying on the same cooldown.
-    if (!this.ready) {
-      if (this.reconnectFailed && Date.now() - this.lastReconnectMs > 45000) { this.lastReconnectMs = Date.now(); await this.reconnect(); }
-      return;
-    }
+    if (!this.ready) return;   // not started (or start failed): nothing to re-dial on; never re-create the node
     await this.refreshPeerInfo();
     const peers = this.d.counters.peers;
     if (peers > 0) { this.everConnected = true; this.zeroPeerTicks = 0; return; }
@@ -269,22 +270,20 @@ export class RealNode implements UnderlyingNode {
     }
   }
 
-  // Re-dial the fleet: stop → start (rebuilds the node from config's entryNodes) → re-join all topics.
+  // Re-dial the fleet on the LIVE node: connect() each entry node, then renew the subscriptions.
+  // Never stop + re-create the node: a second LogosMessaging.new() in the same process segfaults the
+  // native library (SIGSEGV within a second of "node new", seen on device every ~60-100 s offline).
   async reconnect(): Promise<void> {
-    if (this.reconnecting) return;
+    if (this.reconnecting || !this.ready || !this.ctx) return;
     this.reconnecting = true;
-    const topics = [...this.joinedTopics];
+    mark(`redial peerless -> ${this.d.entryNodes.length} entry nodes`);
     try {
-      try { if (this.ctx) await LogosMessaging.stop(this.ctx); } catch { /* already down */ }
-      this.ready = false;
-      this.joinedTopics.clear();     // start() re-joins from the topics we pass it
-      await this.start(topics);      // re-new + re-start + re-join + re-arm timers (didSetup stays true → cheap)
-      this.reconnectFailed = false;
-    } catch {
-      // Leave not-ready; the watchdog retries (see peerWatchdog). Keep the topic list so the retry
-      // (or a later start) re-joins everything, not just what the failed attempt got to.
-      this.reconnectFailed = true;
-      for (const t of topics) this.joinedTopics.add(t);
+      let ok = 0;
+      for (const peer of this.d.entryNodes) {
+        try { await LogosMessaging.connect(this.ctx, peer, 5000); ok++; } catch { /* offline / unreachable */ }
+      }
+      mark(`redial done ok=${ok}`);
+      if (ok > 0) for (const t of this.joinedTopics) LogosMessaging.subscribeContentTopic(this.ctx, t).catch(() => { /* renew tick retries */ });
     }
     finally { this.reconnecting = false; }
   }
