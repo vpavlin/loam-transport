@@ -131,8 +131,11 @@ export class RealNode implements UnderlyingNode {
       await new Promise((r) => setTimeout(r, this.d.SETTLE_MS)); // settle AFTER join
       this.ready = true; // only now does the listener start processing (matches KYM)
       if (this.renewTimer) clearInterval(this.renewTimer);
-      this.renewTimer = setInterval(() => {
+      this.renewTimer = setInterval(async () => {
         if (!this.ready) return;
+        // Offline: skip (nothing to renew against; see reconnect() on offline native crashes).
+        try { const f = (globalThis as any).__loamOnline; if (typeof f === "function" && !(await f())) { mark("renew skipped: offline"); return; } } catch { /* */ }
+        mark(`renew ${this.joinedTopics.size} topics`);
         for (const t of this.joinedTopics) LogosMessaging.subscribeContentTopic(this.ctx, t).catch(() => { /* next tick retries */ });
       }, this.d.FILTER_RENEW_MS);
       // Arm the peerless watchdog (self-polls, so it works even if the app never calls refreshPeerInfo).
@@ -276,14 +279,18 @@ export class RealNode implements UnderlyingNode {
   async reconnect(): Promise<void> {
     if (this.reconnecting || !this.ready || !this.ctx) return;
     this.reconnecting = true;
-    mark(`redial peerless -> ${this.d.entryNodes.length} entry nodes`);
     try {
+      // Offline (no validated internet): skip. Dialing can't succeed, and a dial + subscription burst
+      // on an offline node crashed it natively (SIGSEGV ~1 s after "redial", on device, 2026-09-29).
+      let online = true;
+      try { const f = (globalThis as any).__loamOnline; if (typeof f === "function") online = !!(await f()); } catch { /* */ }
+      if (!online) { mark("redial skipped: offline"); return; }
+      mark(`redial peerless -> ${this.d.entryNodes.length} entry nodes`);
       let ok = 0;
       for (const peer of this.d.entryNodes) {
         try { await LogosMessaging.connect(this.ctx, peer, 5000); ok++; } catch { /* offline / unreachable */ }
       }
-      mark(`redial done ok=${ok}`);
-      if (ok > 0) for (const t of this.joinedTopics) LogosMessaging.subscribeContentTopic(this.ctx, t).catch(() => { /* renew tick retries */ });
+      mark(`redial done ok=${ok}`);   // subscriptions are renewed by the regular renew tick
     }
     finally { this.reconnecting = false; }
   }

@@ -51,6 +51,26 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
 
   override fun getName() = "LoamMesh"
 
+  // Breadcrumb trail (debug): JS marks node lifecycle steps; the file survives a native crash, and the
+  // previous run's trail is shown by lastCrash(). Rotated once per process start.
+  private val trail = java.util.ArrayDeque<String>()
+  private val trailFile by lazy { java.io.File(ctx.filesDir, "loam-trail.txt") }
+  init {
+    try {
+      val f = java.io.File(ctx.filesDir, "loam-trail.txt")
+      if (f.exists()) f.renameTo(java.io.File(ctx.filesDir, "loam-trail-prev.txt"))
+    } catch (_: Exception) {}
+  }
+  @ReactMethod fun mark(s: String) {
+    try {
+      synchronized(trail) {
+        val t = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())
+        trail.addLast("$t $s"); while (trail.size > 80) trail.removeFirst()
+        trailFile.writeText(trail.joinToString("\n"))
+      }
+    } catch (_: Exception) {}
+  }
+
   private val adapter: BluetoothAdapter? by lazy {
     (ctx.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
   }
@@ -224,7 +244,26 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
         }
       }
     } catch (e: Exception) { sb.append("exit info unavailable: ${e.message}\n") }
-    promise.resolve(sb.toString().take(12000))
+    try {
+      val e = java.io.File(ctx.filesDir, "loam-stderr-prev.txt")
+      if (e.exists() && e.length() > 0) sb.append("previous run, native stderr (last 40 lines):\n").append(e.readText().lines().takeLast(40).joinToString("\n")).append("\n")
+    } catch (_: Exception) {}
+    try {
+      val f = java.io.File(ctx.filesDir, "loam-trail-prev.txt")
+      if (f.exists()) sb.append("previous run, last steps:\n").append(f.readText().lines().takeLast(40).joinToString("\n")).append("\n")
+    } catch (_: Exception) {}
+    val out = sb.toString()
+    promise.resolve(if (out.length > 14000) out.takeLast(14000) else out)
+  }
+
+  // Does Android see a network with VALIDATED internet? The node re-dial is skipped when not: dialing
+  // the fleet offline is pointless, and touching the node's networking offline has crashed it.
+  @ReactMethod fun online(promise: Promise) {
+    try {
+      val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+      val caps = cm.getNetworkCapabilities(cm.activeNetwork)
+      promise.resolve(caps?.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true)
+    } catch (_: Exception) { promise.resolve(true) }   // unknown: behave as before
   }
 
   @ReactMethod fun clearCrash(promise: Promise) {
