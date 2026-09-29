@@ -290,6 +290,17 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
     } catch (_: Exception) { promise.resolve(true) }   // unknown: behave as before
   }
 
+  // Restart the whole app process (e.g. to apply a node-mode change: the node is created once per process,
+  // and the foreground service keeps the process alive when the UI is swiped away). Relaunches the UI.
+  @ReactMethod fun restartApp() {
+    try {
+      val i = ctx.packageManager.getLaunchIntentForPackage(ctx.packageName) ?: return
+      i.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_CLEAR_TASK)
+      ctx.startActivity(i)
+    } catch (_: Exception) {}
+    Runtime.getRuntime().exit(0)
+  }
+
   // Dismiss: hide everything up to now (exits are Android's record, so remember a timestamp).
   @ReactMethod fun clearCrash(promise: Promise) {
     try { crashPrefs.edit().putLong("seenTs", System.currentTimeMillis()).apply() } catch (_: Exception) {}
