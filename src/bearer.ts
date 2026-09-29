@@ -84,18 +84,28 @@ export function decodeFrame(bytes: Uint8Array): Frame | null {
   return { id: frameId(topic, payload), topic, hop, payload };
 }
 
-// A bounded set of recently-seen frame ids (loop/flood kill + cross-bearer dedup). Insertion
-// -ordered; evicts the oldest past `cap` so memory stays bounded on a long-lived mesh.
+// A bounded set of recently-seen frame ids (loop/flood kill + cross-bearer dedup). Entries expire
+// after `windowMs`: the mesh only needs to remember a frame long enough to kill its own flood
+// loops (well under a second on a room-sized mesh). Remembering forever blocked every later
+// re-send of the same bytes, and sync re-sends events byte-identically (deterministic sealing),
+// so catch-up over the mesh could never deliver an event a phone had already seen or sent.
+// Insertion-ordered; evicts the oldest past `cap` so memory stays bounded.
 export class SeenSet {
-  private ids = new Set<string>();
-  private order: string[] = [];
+  private seen = new Map<string, number>();   // id -> when it was last recorded (ms)
   private cap: number;
-  constructor(cap = 4096) { this.cap = cap; }
-  has(id: string): boolean { return this.ids.has(id); }
+  private windowMs: number;
+  private now: () => number;
+  constructor(cap = 4096, windowMs = Infinity, now: () => number = Date.now) {
+    this.cap = cap; this.windowMs = windowMs; this.now = now;
+  }
+  has(id: string): boolean {
+    const t = this.seen.get(id);
+    return t !== undefined && this.now() - t < this.windowMs;
+  }
   add(id: string): void {
-    if (this.ids.has(id)) return;
-    this.ids.add(id); this.order.push(id);
-    if (this.order.length > this.cap) { const old = this.order.shift()!; this.ids.delete(old); }
+    this.seen.delete(id);                  // re-insert so the order reflects recency
+    this.seen.set(id, this.now());
+    if (this.seen.size > this.cap) { const oldest = this.seen.keys().next().value; if (oldest !== undefined) this.seen.delete(oldest); }
   }
 }
 
@@ -108,11 +118,11 @@ export class BleMeshBearer implements Bearer {
   private seen: SeenSet;
   private rxCb: (f: Frame) => void = () => {};
   private radio: MeshRadio;
-  private opts: { ttl?: number; seenCap?: number };
-  constructor(radio: MeshRadio, opts: { ttl?: number; seenCap?: number } = {}) {
+  private opts: { ttl?: number; seenCap?: number; seenWindowMs?: number; now?: () => number };
+  constructor(radio: MeshRadio, opts: { ttl?: number; seenCap?: number; seenWindowMs?: number; now?: () => number } = {}) {
     this.radio = radio;
     this.opts = opts;
-    this.seen = new SeenSet(opts.seenCap ?? 4096);
+    this.seen = new SeenSet(opts.seenCap ?? 4096, opts.seenWindowMs ?? 15_000, opts.now);
   }
   async start(): Promise<void> {
     this.radio.onReceiveFrom((peer, bytes) => this._onRadio(peer, bytes));
@@ -122,9 +132,10 @@ export class BleMeshBearer implements Bearer {
   reachablePeers(): number { return this.radio.peers().length; }
   onReceive(cb: (f: Frame) => void): void { this.rxCb = cb; }
 
-  // Originate a local write onto the mesh: flood to every neighbour at full TTL.
+  // Originate a local write onto the mesh: flood to every neighbour at full TTL. Always sends: a
+  // local send is the app deciding this frame should go out now (first publish, a retry, or a
+  // catch-up reply to a newcomer). Recording the id kills our own echo coming back.
   async send(frame: Frame): Promise<void> {
-    if (this.seen.has(frame.id)) return; // already originated/seen — don't re-flood
     this.seen.add(frame.id);
     const ttl = this.opts.ttl ?? 6;
     this._broadcastExcept(null, { ...frame, hop: ttl });

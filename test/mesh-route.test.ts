@@ -128,3 +128,20 @@ test("PROBE does not block clients: probe frame (app→false) + client frame bot
   assert.equal(qakuB.length, 1);
   assert.equal(new TextDecoder().decode(qakuB[0].cands[0]), "real");
 });
+
+test("OWNERSHIP survives a failed node subscribe (offline): BLE frames still reach the client", async () => {
+  const A = makePhone("A"), B = makePhone("B");
+  A.radio.peer = B.radio; B.radio.peer = A.radio;
+  await A.mesh.start(); await B.mesh.start();
+  const T = "/topic/offline-room/proto";
+  let fail = true;
+  B.node.subscribe = async (t: string) => { if (fail) throw new Error("offline: no filter peers"); B.node.subs.push(t); };
+  const qakuB = registerClient(B.broker, "qaku");
+  await assert.rejects(B.broker.tenants.get("qaku")!.subscribe(T));   // the node side failed…
+  await A.mesh.send(makeFrame(T, seal("over-ble")));
+  assert.equal(qakuB.length, 1, "…but the owner is recorded, so the mesh frame is delivered, not dropped as unowned");
+  fail = false;
+  B.broker.registerTenant("scala");
+  await B.broker.tenants.get("scala")!.subscribe(T);                 // the next subscribe retries the node side
+  assert.deepEqual(B.node.subs, [T]);
+});

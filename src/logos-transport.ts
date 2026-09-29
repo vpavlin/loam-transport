@@ -288,8 +288,14 @@ export async function publishSealed(topic: string, sealed: Uint8Array): Promise<
   // never floods its own writes onto BLE, and only online→offline propagates. The Waku
   // send stays AFTER and still throws on failure, so the caller's requeue-for-Waku logic
   // (retry when back online → the event still reaches the fleet/store) is preserved.
+  // meshOk only when a nearby peer actually got it: an armed mesh with nobody in range sends
+  // nothing, and treating that as delivered swallowed the Waku error below, so the app never
+  // re-queued a write that went nowhere.
   let meshOk = false;
-  if (mesh) { counters.bleTx++; noteTopic(meshTxTopics, topic); try { await mesh.send(makeFrame(topic, sealed)); meshOk = true; } catch { /* mesh is best-effort */ } }
+  if (mesh) {
+    counters.bleTx++; noteTopic(meshTxTopics, topic);
+    try { await mesh.send(makeFrame(topic, sealed)); meshOk = mesh.reachablePeers() > 0; } catch { /* mesh is best-effort */ }
+  }
   try {
     await backend!.send(topic, sealed);
   } catch (e) {
@@ -304,10 +310,10 @@ export async function publishSealed(topic: string, sealed: Uint8Array): Promise<
 // Fire-and-forget RAW publish — NO SDS reliable channel. For diagnostics/telemetry: a cold-joining
 // collector can never resolve SDS causal deps (channel sends pile up "missing dependencies" and never
 // deliver), and reliability/ordering are waste here anyway. Uses the backend's raw relay when it has one
-// (RealNode.sendRaw), and still floods the mesh. Best-effort; never throws.
+// (RealNode.sendRaw). Fleet only: diagnostics never ride the BLE mesh, where nearby phones would
+// relay them and count them as dropped (they own no telemetry topic). Best-effort; never throws.
 export async function publishRaw(topic: string, sealed: Uint8Array): Promise<void> {
   ensure();
-  if (mesh) { counters.bleTx++; noteTopic(meshTxTopics, topic); try { await mesh.send(makeFrame(topic, sealed)); } catch { /* */ } }
   const b = backend as any;
   try {
     if (b && typeof b.sendRaw === "function") await b.sendRaw(topic, sealed);
@@ -385,8 +391,16 @@ async function evaluateMesh(): Promise<void> {
   if (degraded && !mesh) await armMesh();
   else if (!degraded && mesh && !meshForced) await disarmMesh();
 }
+// A tick or a forceMesh() landing while `m.start()` is still awaiting would otherwise build a
+// second bearer + radio that nothing ever stops, delivering every frame twice.
+let arming: Promise<void> | null = null;
 async function armMesh(): Promise<void> {
   if (mesh || !meshRadioFactory) return;
+  if (arming) return arming;
+  arming = armMeshNow().finally(() => { arming = null; });
+  return arming;
+}
+async function armMeshNow(): Promise<void> {
   ensure();
   const m = new BleMeshBearer(meshRadioFactory(), meshOpts);
   m.onReceive((f) => {
@@ -395,7 +409,7 @@ async function armMesh(): Promise<void> {
     if (opened) { counters.rxNew++; counters.bleRxDelivered++; noteTopic(meshRxDeliv, f.topic); }
     else { counters.rxDup++; counters.bleRxDropped++; noteTopic(meshRxDrop, f.topic); }
   });
-  try { await m.start(); mesh = m; } catch { /* radio not ready — retry next tick */ }
+  try { await m.start(); mesh = m; } catch { try { await m.stop(); } catch { /* */ } /* radio not ready — retry next tick */ }
 }
 async function disarmMesh(): Promise<void> { const m = mesh; mesh = null; if (m) { try { await m.stop(); } catch { /* */ } } }
 

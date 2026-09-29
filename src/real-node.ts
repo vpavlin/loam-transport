@@ -41,6 +41,7 @@ export class RealNode implements UnderlyingNode {
   private zeroPeerTicks = 0;
   private lastReconnectMs = 0;
   private reconnecting = false;
+  private reconnectFailed = false;   // last re-dial threw; the watchdog keeps retrying
   private deviceId = "";
   private route: (topic: string, payload: any) => boolean = () => false;
   readonly joinedTopics = new Set<string>();   // KYM `routes`
@@ -248,7 +249,14 @@ export class RealNode implements UnderlyingNode {
   // We just give the FIRST connect a longer grace (~60s) so a normal cold-start mesh isn't cut short;
   // after we've ever connected, a drop re-dials at ~30s. Either way the 45s cooldown prevents thrash.
   private async peerWatchdog(): Promise<void> {
-    if (!this.ready || this.reconnecting) return;
+    if (this.reconnecting) return;
+    // A failed re-dial leaves the node not-ready. Without this the watchdog returned early on every
+    // tick from then on, so a node that failed to restart while offline never came back when the
+    // internet did. Keep retrying on the same cooldown.
+    if (!this.ready) {
+      if (this.reconnectFailed && Date.now() - this.lastReconnectMs > 45000) { this.lastReconnectMs = Date.now(); await this.reconnect(); }
+      return;
+    }
     await this.refreshPeerInfo();
     const peers = this.d.counters.peers;
     if (peers > 0) { this.everConnected = true; this.zeroPeerTicks = 0; return; }
@@ -271,7 +279,13 @@ export class RealNode implements UnderlyingNode {
       this.ready = false;
       this.joinedTopics.clear();     // start() re-joins from the topics we pass it
       await this.start(topics);      // re-new + re-start + re-join + re-arm timers (didSetup stays true → cheap)
-    } catch { /* leave not-ready; the next watchdog tick retries */ }
+      this.reconnectFailed = false;
+    } catch {
+      // Leave not-ready; the watchdog retries (see peerWatchdog). Keep the topic list so the retry
+      // (or a later start) re-joins everything, not just what the failed attempt got to.
+      this.reconnectFailed = true;
+      for (const t of topics) this.joinedTopics.add(t);
+    }
     finally { this.reconnecting = false; }
   }
 

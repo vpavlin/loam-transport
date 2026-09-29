@@ -18,6 +18,8 @@ import android.bluetooth.BluetoothStatusCodes
 import android.bluetooth.le.*
 import android.content.Context
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelUuid
 import android.util.Base64
 import android.util.Log
@@ -35,9 +37,12 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
     val CCCD_UUID: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
     const val DEFAULT_MTU = 512
     const val TAG = "LOAMMESH"
-    // GATT payload type byte (ADR 0014): 'A' announce (payload = node id), 'F' fragment.
+    // GATT payload type byte (ADR 0014): 'A' announce (payload = node id), 'Q' announce and ask the
+    // peer to announce back (sent while we still don't know who is on a link), 'F' fragment.
     const val T_ANNOUNCE = 0x41
+    const val T_ANNOUNCE_REQ = 0x51
     const val T_FRAG = 0x46
+    const val WIRE_ID_BYTES = 12   // node id on the wire = base64url(sha256(deviceId)[0..12]) = 16 chars
     const val REASM_TIMEOUT_MS = 30000L
   }
 
@@ -79,36 +84,98 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
   // rotating BLE MAC — this collapses RPA "ghost" peers to one logical device. The node id is
   // the app's stable deviceId, set by JS before start() and announced on every link.
   @Volatile private var myNodeId: String = ""
+  // What we announce: a fixed 16-char hash of the node id. An announce is 1 + id bytes and has to
+  // fit one GATT write/notify (MTU - 3 = 20 bytes if MTU negotiation fails); the raw deviceId
+  // ("dev-…", ~24 chars) did not. Peers only use the id as an opaque key.
+  @Volatile private var wireId: String = ""
   private val addrToNode = ConcurrentHashMap<String, String>()               // BLE address -> peer node id
   private val nodeToAddrs = ConcurrentHashMap<String, MutableSet<String>>()  // node id -> its link addresses
   private val reasmTime = ConcurrentHashMap<String, Long>()                  // reassembly key -> first-seen ms
+  // Connection setup must be SERIALIZED (BLE allows one GATT op per link): MTU -> discover -> CCCD
+  // write -> announce, each step driven by the previous op's completion callback. Firing them
+  // back-to-back was the root bug — the announce collided with the in-flight CCCD write, got
+  // dropped, and the peer stayed unannounced -> unrouted -> silent (ADR 0014). We also re-announce
+  // periodically until the peer is learned, per ADR 0014's "send on connect and periodically".
+  private val mainHandler = Handler(Looper.getMainLooper())
+  private val discovered = ConcurrentHashMap<String, Boolean>()   // discoverServices already issued for this link?
+  private val announceTries = ConcurrentHashMap<String, Int>()    // bounded re-announce attempts per link
+  private val ANNOUNCE_RETRY_MS = 2500L
+  private val ANNOUNCE_MAX_TRIES = 8
+  // While we don't know who is on a link (client OR server side), ask: an announce-REQ makes the
+  // peer announce back. (Re-sending only OUR id never taught us THEIRS, and a server link used to
+  // announce exactly once, so one lost frame left the link one-way for good.) A link that stays
+  // anonymous for ANNOUNCE_MAX_TRIES ticks is dropped so the scanner re-dials it from scratch;
+  // that also clears zombie links whose setup silently failed.
+  private val announceRetry = object : Runnable {
+    override fun run() {
+      if (wireId.isNotEmpty()) {
+        for (addr in (clientGatts.keys + serverDevices.keys).toSet()) {
+          if (addrToNode.containsKey(addr)) { announceTries.remove(addr); continue }  // peer known on this link
+          val n = announceTries[addr] ?: 0
+          if (n < ANNOUNCE_MAX_TRIES) { announceTries[addr] = n + 1; sendAnnounce(addr, askBack = true) }
+          else { dropLink(addr, "no announce after ${n} tries") }
+        }
+      }
+      mainHandler.postDelayed(this, ANNOUNCE_RETRY_MS)
+    }
+  }
 
   // ── JS API ────────────────────────────────────────────────────────────────
   // Set our stable node id (the app's deviceId). MUST be called before start() so our first
   // announce carries it. Idempotent.
-  @ReactMethod fun setNodeId(id: String, promise: Promise) { myNodeId = id; Log.i(TAG, "nodeId=$id"); promise.resolve(true) }
+  @ReactMethod fun setNodeId(id: String, promise: Promise) {
+    myNodeId = id
+    val h = java.security.MessageDigest.getInstance("SHA-256").digest(id.toByteArray(Charsets.UTF_8)).copyOf(WIRE_ID_BYTES)
+    wireId = Base64.encodeToString(h, Base64.NO_WRAP or Base64.NO_PADDING or Base64.URL_SAFE)
+    Log.i(TAG, "nodeId=$id wire=$wireId"); promise.resolve(true)
+  }
 
   @ReactMethod fun start(promise: Promise) {
     try {
       val a = adapter ?: return promise.reject("no_bt", "no Bluetooth adapter")
       if (!a.isEnabled) return promise.reject("bt_off", "Bluetooth is off")
       Log.i(TAG, "start: ${Build.MANUFACTURER} ${Build.MODEL} api=${Build.VERSION.SDK_INT} peripheralAdvSupported=${a.isMultipleAdvertisementSupported} self=${a.address}")
+      stopInternal()   // idempotent: a start after a partial/failed start begins clean
       startServer(a)
       startAdvertising(a)
       startScanning(a)
+      mainHandler.postDelayed(announceRetry, ANNOUNCE_RETRY_MS)   // ADR 0014: ask until learned
       promise.resolve(true)
-    } catch (e: Exception) { promise.reject("start_fail", e.message, e) }
+    } catch (e: Exception) {
+      // e.g. SecurityException (Nearby devices denied) after the GATT server was already open: release
+      // it, or every retry would open another server with a duplicate Loam service.
+      try { stopInternal() } catch (_: Exception) {}
+      promise.reject("start_fail", e.message, e)
+    }
   }
 
   @ReactMethod fun stop(promise: Promise) {
-    try {
-      advertiser?.stopAdvertising(advCallback)
-      scanner?.stopScan(scanCallback)
-      for (g in clientGatts.values) try { g.close() } catch (_: Exception) {}
-      clientGatts.clear(); serverDevices.clear(); mtu.clear(); connecting.clear()
-      gattServer?.close(); gattServer = null
-      promise.resolve(true)
-    } catch (e: Exception) { promise.reject("stop_fail", e.message, e) }
+    try { stopInternal(); promise.resolve(true) } catch (e: Exception) { promise.reject("stop_fail", e.message, e) }
+  }
+
+  // Tear down radios AND every per-link table. close() fires no disconnect callback, so forgetAddr never
+  // ran for these links; stale inFlight/sendQ/identity entries then muted a re-formed link to the same
+  // address (pump() saw inFlight=true forever).
+  private fun stopInternal() {
+    mainHandler.removeCallbacks(announceRetry)
+    try { advertiser?.stopAdvertising(advCallback) } catch (_: Exception) {}
+    try { scanner?.stopScan(scanCallback) } catch (_: Exception) {}
+    for (g in clientGatts.values) try { g.close() } catch (_: Exception) {}
+    try { gattServer?.close() } catch (_: Exception) {}
+    gattServer = null
+    clientGatts.clear(); serverDevices.clear(); mtu.clear(); connecting.clear()
+    discovered.clear(); announceTries.clear()
+    inFlight.clear(); sendQ.clear(); addrToNode.clear(); nodeToAddrs.clear()
+    reasm.clear(); reasmCount.clear(); reasmTime.clear()
+  }
+
+  // Drop a link we can't use (anonymous, or services missing) so the scanner re-dials it cleanly.
+  private fun dropLink(addr: String, why: String) {
+    Log.w(TAG, "dropping link $addr: $why")
+    stLastErr = "drop $why"
+    announceTries.remove(addr)
+    clientGatts[addr]?.let { try { it.disconnect() } catch (_: Exception) {} }
+    serverDevices[addr]?.let { d -> try { gattServer?.cancelConnection(d) } catch (_: Exception) {} }
   }
 
   @ReactMethod fun peers(promise: Promise) {
@@ -124,7 +191,7 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
     val mtus = if (mtu.isEmpty()) "-" else mtu.values.toSet().joinToString(",")
     val links = (clientGatts.keys + serverDevices.keys).toSet()
     val pend = links.count { !addrToNode.containsKey(it) }
-    val me = if (myNodeId.length >= 6) myNodeId.substring(0, 6) else myNodeId
+    val me = wireId.take(6)
     promise.resolve("node=$me nodes=${connectedPeers().size} cli=${clientGatts.size} srv=${serverDevices.size} pend=$pend mtu=$mtus " +
       "sent=$stFragSent wOk=$stWriteOk wFail=$stWriteFail recv=$stFragRecv deliv=$stDelivered reasm=${reasm.size} lastFrag=$stLastFrag" +
       (if (stLastErr.isNotEmpty()) " err=$stLastErr" else ""))
@@ -149,13 +216,14 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
     return addrs.firstOrNull { clientGatts.containsKey(it) } ?: addrs.firstOrNull { serverDevices.containsKey(it) }
   }
   // Announce our node id over a link (jumps the send queue so peers learn identity first).
-  private fun sendAnnounce(addr: String) {
-    if (myNodeId.isEmpty()) return
-    val idb = myNodeId.toByteArray(Charsets.UTF_8)
-    val frame = ByteArray(1 + idb.size); frame[0] = T_ANNOUNCE.toByte(); System.arraycopy(idb, 0, frame, 1, idb.size)
+  // askBack = also ask the peer to announce itself (we don't know who is on this link yet).
+  private fun sendAnnounce(addr: String, askBack: Boolean = false) {
+    if (wireId.isEmpty()) return
+    val idb = wireId.toByteArray(Charsets.UTF_8)
+    val frame = ByteArray(1 + idb.size); frame[0] = (if (askBack) T_ANNOUNCE_REQ else T_ANNOUNCE).toByte(); System.arraycopy(idb, 0, frame, 1, idb.size)
     val q = sendQ.getOrPut(addr) { java.util.ArrayDeque() }
     synchronized(q) { q.addFirst(frame) }
-    Log.d(TAG, "announce -> $addr (node ${myNodeId.take(6)})")
+    Log.d(TAG, "announce -> $addr (wire ${wireId.take(6)}, ${frame.size}B)")
     pump(addr)
   }
 
@@ -186,7 +254,10 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
       device: BluetoothDevice, requestId: Int, ch: BluetoothGattCharacteristic,
       preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray,
     ) {
-      Log.d(TAG, "server<-write ${device.address} ${value.size}B match=${ch.uuid == CHAR_UUID}")
+      Log.d(TAG, "server<-write ${device.address} ${value.size}B match=${ch.uuid == CHAR_UUID} prepared=$preparedWrite")
+      // Frames are sized to fit one write; a prepared (long) write would arrive as unrelated chunks
+      // and needs onExecuteWrite, which we don't implement. Refuse it rather than corrupt a frame.
+      if (preparedWrite) { if (responseNeeded) gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED, offset, null); return }
       if (ch.uuid == CHAR_UUID) onFragment(device.address, value)
       if (responseNeeded) gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
     }
@@ -246,20 +317,23 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
       if (clientGatts.containsKey(addr) || connecting[addr] == true) return
       Log.d(TAG, "scan saw $addr — dialing")
       connecting[addr] = true
-      dev.connectGatt(ctx, false, clientCallback)
+      // TRANSPORT_LE: without it dual-mode phones may try BR/EDR and fail with status 133.
+      if (Build.VERSION.SDK_INT >= 23) dev.connectGatt(ctx, false, clientCallback, BluetoothDevice.TRANSPORT_LE)
+      else dev.connectGatt(ctx, false, clientCallback)
     }
   }
   private val clientCallback = object : BluetoothGattCallback() {
     override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
       val addr = gatt.device.address
       if (newState == BluetoothProfile.STATE_CONNECTED) {
-        clientGatts[addr] = gatt; connecting.remove(addr); emitPeers()
-        Log.d(TAG, "client connected $addr — requestMtu + discoverServices")
-        gatt.requestMtu(DEFAULT_MTU)
-        // Discover DIRECTLY on connect — do NOT gate on onMtuChanged. If the MTU callback
-        // never fires (common on many stacks) services are never discovered, getCharacteristic
-        // returns null, and every write is silently dropped: the entire data path is dead.
-        gatt.discoverServices()
+        clientGatts[addr] = gatt; connecting.remove(addr); discovered[addr] = false; emitPeers()
+        Log.d(TAG, "client connected $addr — requestMtu then discover")
+        // Serialize: request MTU, then discover in onMtuChanged (one GATT op at a time). If the MTU
+        // callback never fires (some stacks are silent), a fallback timer discovers anyway — so we
+        // neither collide the two ops NOR stall discovery on a silent stack. discoverOnce() guards
+        // against the two paths both firing.
+        if (!gatt.requestMtu(DEFAULT_MTU)) discoverOnce(gatt)     // couldn't queue MTU → discover now
+        mainHandler.postDelayed({ discoverOnce(gatt) }, 1200)     // fallback if onMtuChanged is silent
       } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
         Log.d(TAG, "client disconnected $addr status=$status")
         clientGatts.remove(addr); connecting.remove(addr); forgetAddr(addr)
@@ -267,18 +341,35 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
         emitPeers()
       }
     }
-    override fun onMtuChanged(gatt: BluetoothGatt, m: Int, status: Int) { mtu[gatt.device.address] = m; Log.d(TAG, "client mtu ${gatt.device.address}=$m") }
+    override fun onMtuChanged(gatt: BluetoothGatt, m: Int, status: Int) {
+      mtu[gatt.device.address] = m; Log.d(TAG, "client mtu ${gatt.device.address}=$m")
+      discoverOnce(gatt)   // MTU op settled → now discover (serialized, no collision)
+    }
+    @Suppress("DEPRECATION")   // 1-arg writeDescriptor(it) with it.value= works on all APIs
     override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+      val addr = gatt.device.address
       val ch = gatt.getService(SERVICE_UUID)?.getCharacteristic(CHAR_UUID)
-      if (ch == null) { Log.e(TAG, "client services ${gatt.device.address} status=$status — Loam char NOT FOUND"); return }
-      Log.d(TAG, "client services ${gatt.device.address} — enabling notify")
+      // No Loam characteristic (discovery failed, or we connected before the peer's service was up):
+      // disconnect so the scanner re-dials, instead of keeping a link that can never carry data.
+      if (ch == null) { Log.e(TAG, "client services $addr status=$status — Loam char NOT FOUND"); dropLink(addr, "no Loam char"); return }
+      Log.d(TAG, "client services $addr — enabling notify")
       gatt.setCharacteristicNotification(ch, true)
-      ch.getDescriptor(CCCD_UUID)?.let {
-        it.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-        gatt.writeDescriptor(it)
+      // Enable notifications by writing the CCCD. That write is now the in-flight GATT op, so we
+      // must NOT send the announce here — doing so collided with this write and the announce was
+      // dropped (the root cause). The announce is sent in onDescriptorWrite once this completes.
+      // Fallback: if the CCCD write can't even be queued (or there's no CCCD), announce directly.
+      val cccd = ch.getDescriptor(CCCD_UUID)
+      val queued = cccd?.let { it.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE; gatt.writeDescriptor(it) } ?: false
+      emitPeers() // link usable now
+      if (!queued) { Log.d(TAG, "cccd not queued for $addr — announcing directly"); sendAnnounce(addr) }
+    }
+    // CCCD write finished: notifications are on AND the link is free — NOW announce our identity.
+    // (Announcing before this completed is exactly what dropped the frame — one GATT op per link.)
+    override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+      if (descriptor.uuid == CCCD_UUID) {
+        Log.d(TAG, "client cccd written ${gatt.device.address} status=$status — announcing")
+        sendAnnounce(gatt.device.address)
       }
-      emitPeers() // usable now
-      sendAnnounce(gatt.device.address)   // link is writable → tell the peer who we are
     }
     // Peer NOTIFIED us. Android 13+ (API 33) delivers to the 3-arg override with `value` and
     // NEVER calls the deprecated 2-arg one — so on modern phones the old override alone
@@ -299,12 +390,28 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
     }
   }
 
+  // Issue discoverServices exactly once per link. Both onMtuChanged AND the fallback timer call
+  // this; the guard makes the loser a no-op. Serializing MTU->discover (instead of firing them
+  // together) stops the discover from being lost to the in-flight MTU op on strict stacks.
+  private fun discoverOnce(gatt: BluetoothGatt) {
+    val addr = gatt.device.address
+    if (clientGatts[addr] !== gatt) return           // stale/closed link
+    if (discovered.put(addr, true) == true) return   // already discovering
+    Log.d(TAG, "discoverServices $addr")
+    gatt.discoverServices()
+  }
+
   // ── fragmentation ───────────────────────────────────────────────────────────
   // [ msgId hi, msgId lo, idx, count, chunk… ]. Reassemble per (addr,msgId); deliver when
   // all `count` fragments have arrived.
   private fun sendFragments(addr: String, bytes: ByteArray) {
-    val cap = ((mtu[addr] ?: 23) - 3 - 5).coerceAtLeast(16) // ATT(3) + type(1) + frag header(4)
+    // Each fragment must fit ONE write/notify: MTU - 3 (ATT) - 5 (type + msgId + idx + count). No
+    // floor: the old floor of 16 made 21-byte frames at the default MTU 23, which only carries 20.
+    val cap = ((mtu[addr] ?: 23) - 3 - 5).coerceAtLeast(1)
     val count = ((bytes.size + cap - 1) / cap).coerceAtLeast(1)
+    if (count > 255) {   // idx/count are one byte each; more would silently wrap and corrupt reassembly
+      stLastErr = "too big ${bytes.size}B"; Log.e(TAG, "sendFragments $addr ${bytes.size}B needs $count frags (max 255) — dropped"); return
+    }
     val id = (msgSeq++ and 0xffff)
     val q = sendQ.getOrPut(addr) { java.util.ArrayDeque() }
     var off = 0
@@ -374,6 +481,7 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
     if (frame.isEmpty()) return
     when (frame[0].toInt() and 0xff) {
       T_ANNOUNCE -> { onAnnounce(addr, frame); return }
+      T_ANNOUNCE_REQ -> { onAnnounce(addr, frame); sendAnnounce(addr); return }   // they don't know us yet: answer
       T_FRAG -> { /* fall through */ }
       else -> return
     }
@@ -401,7 +509,7 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
   // Learn a peer's stable node id from its announce; map address<->node so ghosts collapse.
   private fun onAnnounce(addr: String, frame: ByteArray) {
     val node = String(frame, 1, frame.size - 1, Charsets.UTF_8)
-    if (node.isEmpty() || node == myNodeId) return
+    if (node.isEmpty() || node == wireId) return
     val prev = addrToNode.put(addr, node)
     nodeToAddrs.getOrPut(node) { java.util.concurrent.ConcurrentHashMap.newKeySet<String>() }.add(addr)
     if (prev != node) Log.d(TAG, "announce <- $addr is node ${node.take(6)} (links=${nodeToAddrs[node]?.size})")
@@ -419,7 +527,7 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
   // A link to `addr` is gone — forget its identity mapping, queue, mtu, and reasm buffers.
   private fun forgetAddr(addr: String) {
     addrToNode.remove(addr)?.let { node -> nodeToAddrs[node]?.let { it.remove(addr); if (it.isEmpty()) nodeToAddrs.remove(node) } }
-    inFlight.remove(addr); sendQ.remove(addr); mtu.remove(addr)
+    inFlight.remove(addr); sendQ.remove(addr); mtu.remove(addr); discovered.remove(addr); announceTries.remove(addr)
     for (k in reasm.keys.filter { it.startsWith("$addr/") }) { reasm.remove(k); reasmCount.remove(k); reasmTime.remove(k) }
   }
 

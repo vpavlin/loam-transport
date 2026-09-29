@@ -46,17 +46,27 @@ export class SharedDeliveryNode {
 
   // ---- internal, called by Tenant ----
 
+  // Ownership is recorded BEFORE the node subscribe: a frame for this topic can arrive at any time
+  // (over the BLE mesh it needs no node subscription at all), and an owner-less topic drops it as
+  // "unowned". If the node subscribe fails (e.g. offline), the owner stays recorded and the next
+  // subscribe for the topic retries the node side.
+  private nodeSubPending = new Set<string>();
   async _subscribe(tenantId: string, topic: string): Promise<void> {
     let set = this.owners.get(topic);
-    if (!set) { set = new Set(); this.owners.set(topic, set); await this.node.subscribe(topic); }
+    const fresh = !set;
+    if (!set) { set = new Set(); this.owners.set(topic, set); }
     set.add(tenantId);
+    if (fresh || this.nodeSubPending.has(topic)) {
+      try { await this.node.subscribe(topic); this.nodeSubPending.delete(topic); }
+      catch (e) { this.nodeSubPending.add(topic); throw e; }
+    }
   }
 
   async _unsubscribe(tenantId: string, topic: string): Promise<void> {
     const set = this.owners.get(topic);
     if (!set) return;
     set.delete(tenantId);
-    if (set.size === 0) { this.owners.delete(topic); await this.node.unsubscribe(topic); }
+    if (set.size === 0) { this.owners.delete(topic); this.nodeSubPending.delete(topic); await this.node.unsubscribe(topic); }
   }
 
   // Record ownership of topics the node already joined during its bring-up (join-before-
