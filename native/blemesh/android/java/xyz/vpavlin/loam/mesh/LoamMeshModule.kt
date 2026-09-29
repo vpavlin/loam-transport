@@ -44,6 +44,9 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
     const val T_FRAG = 0x46
     const val WIRE_ID_BYTES = 12   // node id on the wire = base64url(sha256(deviceId)[0..12]) = 16 chars
     const val REASM_TIMEOUT_MS = 30000L
+    // Android caps one attribute value at 512 bytes whatever the MTU: a write/notify longer than that is
+    // rejected by the peer (API < 33) or throws IllegalArgumentException (API 33+). MTU 517 allows 514.
+    const val MAX_ATTR_LEN = 512
   }
 
   override fun getName() = "LoamMesh"
@@ -108,14 +111,14 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
   // that also clears zombie links whose setup silently failed.
   private val announceRetry = object : Runnable {
     override fun run() {
-      if (wireId.isNotEmpty()) {
+      if (wireId.isNotEmpty()) try {
         for (addr in (clientGatts.keys + serverDevices.keys).toSet()) {
           if (addrToNode.containsKey(addr)) { announceTries.remove(addr); continue }  // peer known on this link
           val n = announceTries[addr] ?: 0
           if (n < ANNOUNCE_MAX_TRIES) { announceTries[addr] = n + 1; sendAnnounce(addr, askBack = true) }
           else { dropLink(addr, "no announce after ${n} tries") }
         }
-      }
+      } catch (e: Exception) { Log.e(TAG, "announceRetry", e) }
       mainHandler.postDelayed(this, ANNOUNCE_RETRY_MS)
     }
   }
@@ -197,6 +200,38 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
       (if (stLastErr.isNotEmpty()) " err=$stLastErr" else ""))
   }
 
+  // Last crash report for on-screen display: the JVM/JS crash file the app's uncaught handler writes
+  // (loam-last-crash.txt), plus Android's own record of recent process exits (API 30+), which also
+  // covers native crashes and ANRs the JVM handler never sees.
+  @ReactMethod fun lastCrash(promise: Promise) {
+    val sb = StringBuilder()
+    try {
+      val f = java.io.File(ctx.filesDir, "loam-last-crash.txt")
+      if (f.exists()) sb.append("JVM crash:\n").append(f.readText()).append("\n")
+    } catch (_: Exception) {}
+    try {
+      if (Build.VERSION.SDK_INT >= 30) {
+        val am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+        for (x in am.getHistoricalProcessExitReasons(ctx.packageName, 0, 4)) {
+          sb.append("exit ${java.util.Date(x.timestamp)} proc=${x.processName} reason=${x.reason} status=${x.status} ${x.description ?: ""}\n")
+          val native = x.reason == android.app.ApplicationExitInfo.REASON_CRASH_NATIVE || x.reason == android.app.ApplicationExitInfo.REASON_ANR
+          if (native) try {
+            x.traceInputStream?.use { ins ->
+              val head = ins.bufferedReader().lineSequence().take(60).joinToString("\n")
+              sb.append(head).append("\n")
+            }
+          } catch (_: Exception) {}
+        }
+      }
+    } catch (e: Exception) { sb.append("exit info unavailable: ${e.message}\n") }
+    promise.resolve(sb.toString().take(12000))
+  }
+
+  @ReactMethod fun clearCrash(promise: Promise) {
+    try { java.io.File(ctx.filesDir, "loam-last-crash.txt").delete() } catch (_: Exception) {}
+    promise.resolve(true)
+  }
+
   // sendTo(nodeId, base64) — pick ONE live link for that node and send. `peer` is a stable
   // NODE ID (ADR 0014), not a MAC — so duplicate ghost links are collapsed to a single send.
   @ReactMethod fun sendTo(peer: String, dataB64: String, promise: Promise) {
@@ -275,6 +310,7 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
     override fun onMtuChanged(device: BluetoothDevice, m: Int) { mtu[device.address] = m }
     // A notification finished sending — send the next queued fragment to this central.
     override fun onNotificationSent(device: BluetoothDevice, status: Int) {
+      if (status != BluetoothGatt.GATT_SUCCESS) { stWriteOk--; stWriteFail++; stLastErr = "notify status $status" }
       inFlight[device.address] = false
       pump(device.address)
     }
@@ -385,6 +421,8 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
     // Our write completed (write-WITH-response gives this callback) — send the next queued
     // fragment. This one-at-a-time pacing is what makes multi-fragment delivery work at all.
     override fun onCharacteristicWrite(gatt: BluetoothGatt, ch: BluetoothGattCharacteristic, status: Int) {
+      // The peer can still reject a write we queued fine (e.g. too long): count it, don't call it sent.
+      if (status != BluetoothGatt.GATT_SUCCESS) { stWriteOk--; stWriteFail++; stLastErr = "write status $status" }
       inFlight[gatt.device.address] = false
       pump(gatt.device.address)
     }
@@ -407,7 +445,7 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
   private fun sendFragments(addr: String, bytes: ByteArray) {
     // Each fragment must fit ONE write/notify: MTU - 3 (ATT) - 5 (type + msgId + idx + count). No
     // floor: the old floor of 16 made 21-byte frames at the default MTU 23, which only carries 20.
-    val cap = ((mtu[addr] ?: 23) - 3 - 5).coerceAtLeast(1)
+    val cap = (minOf((mtu[addr] ?: 23) - 3, MAX_ATTR_LEN) - 5).coerceAtLeast(1)
     val count = ((bytes.size + cap - 1) / cap).coerceAtLeast(1)
     if (count > 255) {   // idx/count are one byte each; more would silently wrap and corrupt reassembly
       stLastErr = "too big ${bytes.size}B"; Log.e(TAG, "sendFragments $addr ${bytes.size}B needs $count frags (max 255) — dropped"); return
@@ -448,7 +486,13 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
     }
   }
   @Suppress("DEPRECATION")   // pre-33 fallbacks use the deprecated setValue()/write forms
-  private fun writeToPeer(peer: String, frame: ByteArray): Boolean {
+  private fun writeToPeer(peer: String, frame: ByteArray): Boolean =
+    // Never let a radio call throw into a Binder/main-thread callback — that kills the whole app.
+    try { writeToPeerUnsafe(peer, frame) } catch (e: Exception) {
+      stLastErr = "write threw ${e.javaClass.simpleName}"; Log.e(TAG, "writeToPeer $peer threw", e); false
+    }
+  @Suppress("DEPRECATION")
+  private fun writeToPeerUnsafe(peer: String, frame: ByteArray): Boolean {
     clientGatts[peer]?.let { g ->
       val ch = g.getService(SERVICE_UUID)?.getCharacteristic(CHAR_UUID)
       if (ch == null) { stLastErr = "cli char null"; Log.e(TAG, "writeToPeer $peer — client char null (services not discovered)"); return false }
