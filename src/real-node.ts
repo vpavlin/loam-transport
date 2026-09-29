@@ -40,6 +40,16 @@ export class RealNode implements UnderlyingNode {
   // Peerless watchdog: peer-exchange can't recover from 0 peers (no peer to ask), and on mobile the
   // mesh also drops on doze / wifi↔cellular handoff. Poll peers; re-dial if peerless after connecting.
   private watchdogTimer: ReturnType<typeof setInterval> | null = null;
+  // Node maintenance (re-dial, subscription renewal) runs one job at a time: the two used to fire in the
+  // same second and the native node segfaulted ~1 s later, intermittently (on device, 2026-09-29).
+  private nodeJob: Promise<void> = Promise.resolve();
+  private exclusive(job: () => Promise<void>): Promise<void> {
+    const run = this.nodeJob.then(job, job);
+    this.nodeJob = run.catch(() => { /* */ });
+    return run;
+  }
+  // Re-dial gap: doubles while re-dialing doesn't bring peers (up to 10 min), resets once peers appear.
+  private redialGapMs = 45000;
   private everConnected = false;
   private zeroPeerTicks = 0;
   private lastReconnectMs = 0;
@@ -131,13 +141,13 @@ export class RealNode implements UnderlyingNode {
       await new Promise((r) => setTimeout(r, this.d.SETTLE_MS)); // settle AFTER join
       this.ready = true; // only now does the listener start processing (matches KYM)
       if (this.renewTimer) clearInterval(this.renewTimer);
-      this.renewTimer = setInterval(async () => {
+      this.renewTimer = setInterval(() => { this.exclusive(async () => {
         if (!this.ready) return;
         // Offline: skip (nothing to renew against; see reconnect() on offline native crashes).
         try { const f = (globalThis as any).__loamOnline; if (typeof f === "function" && !(await f())) { mark("renew skipped: offline"); return; } } catch { /* */ }
         mark(`renew ${this.joinedTopics.size} topics`);
-        for (const t of this.joinedTopics) LogosMessaging.subscribeContentTopic(this.ctx, t).catch(() => { /* next tick retries */ });
-      }, this.d.FILTER_RENEW_MS);
+        for (const t of [...this.joinedTopics]) { try { await LogosMessaging.subscribeContentTopic(this.ctx, t); } catch { /* next tick retries */ } }
+      }).catch(() => { /* */ }); }, this.d.FILTER_RENEW_MS);
       // Arm the peerless watchdog (self-polls, so it works even if the app never calls refreshPeerInfo).
       this.everConnected = false; this.zeroPeerTicks = 0;
       if (this.watchdogTimer) clearInterval(this.watchdogTimer);
@@ -263,11 +273,12 @@ export class RealNode implements UnderlyingNode {
     if (!this.ready) return;   // not started (or start failed): nothing to re-dial on; never re-create the node
     await this.refreshPeerInfo();
     const peers = this.d.counters.peers;
-    if (peers > 0) { this.everConnected = true; this.zeroPeerTicks = 0; return; }
+    if (peers > 0) { this.everConnected = true; this.zeroPeerTicks = 0; this.redialGapMs = 45000; return; }
     if (peers !== 0) return; // -1 = metrics not read yet; don't count it as peerless
     const threshold = this.everConnected ? 3 : 6;   // ~30s after a drop, ~60s for the first connect
-    if (++this.zeroPeerTicks >= threshold && Date.now() - this.lastReconnectMs > 45000) {
+    if (++this.zeroPeerTicks >= threshold && Date.now() - this.lastReconnectMs > this.redialGapMs) {
       this.lastReconnectMs = Date.now(); this.zeroPeerTicks = 0;
+      this.redialGapMs = Math.min(this.redialGapMs * 2, 600000);   // reset to 45 s when peers appear
       try { console.warn(`[loam] mobile node peerless ~${threshold * 10}s (everConnected=${this.everConnected}) → re-dialing`); } catch { /* */ }
       await this.reconnect();
     }
@@ -279,6 +290,9 @@ export class RealNode implements UnderlyingNode {
   async reconnect(): Promise<void> {
     if (this.reconnecting || !this.ready || !this.ctx) return;
     this.reconnecting = true;
+    return this.exclusive(() => this.redial());
+  }
+  private async redial(): Promise<void> {
     try {
       // Offline (no validated internet): skip. Dialing can't succeed, and a dial + subscription burst
       // on an offline node crashed it natively (SIGSEGV ~1 s after "redial", on device, 2026-09-29).

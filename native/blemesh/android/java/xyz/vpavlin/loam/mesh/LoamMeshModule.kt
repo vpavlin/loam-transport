@@ -215,7 +215,8 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
     val links = (clientGatts.keys + serverDevices.keys).toSet()
     val pend = links.count { !addrToNode.containsKey(it) }
     val me = wireId.take(6)
-    promise.resolve("node=$me nodes=${connectedPeers().size} cli=${clientGatts.size} srv=${serverDevices.size} pend=$pend mtu=$mtus " +
+    val backlog = sendQ.values.sumOf { q -> synchronized(q) { q.size } }
+    promise.resolve("node=$me nodes=${connectedPeers().size} cli=${clientGatts.size} srv=${serverDevices.size} pend=$pend q=$backlog mtu=$mtus " +
       "sent=$stFragSent wOk=$stWriteOk wFail=$stWriteFail recv=$stFragRecv deliv=$stDelivered reasm=${reasm.size} lastFrag=$stLastFrag" +
       (if (stLastErr.isNotEmpty()) " err=$stLastErr" else ""))
   }
@@ -442,6 +443,9 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
     // (Announcing before this completed is exactly what dropped the frame — one GATT op per link.)
     override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
       if (descriptor.uuid == CCCD_UUID) {
+        // Ask for a short connection interval: the default balanced one caps a write-with-response
+        // link at a few KB/s, which a catch-up burst saturates. Not a queued GATT op, so no collision.
+        try { gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH) } catch (_: Exception) {}
         Log.d(TAG, "client cccd written ${gatt.device.address} status=$status — announcing")
         sendAnnounce(gatt.device.address)
       }
