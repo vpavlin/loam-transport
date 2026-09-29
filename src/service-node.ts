@@ -24,6 +24,8 @@ export class ServiceNode implements UnderlyingNode {
   awaitingApproval = false;   // bound + node up, but this app hasn't been approved by the owner
   private sawNodeUp = false;  // have we seen the shared node actually report health this session?
   readonly joinedTopics = new Set<string>();
+  // BLE mesh state proxied from the shared Loam node's metrics (see refreshPeerInfo).
+  blePeers = 0; bleArmed = false; bleForced = false;
   storeInfo = "store: via shared service";
 
   constructor(opts: { appId: string; counters?: any; diag?: any }) { this.appId = opts.appId; this.counters = opts.counters; this.diag = opts.diag; }
@@ -138,6 +140,16 @@ export class ServiceNode implements UnderlyingNode {
       this.nodeDown = typeof m.peers !== "number";   // bound but node/JS not reporting
       if (typeof m.peers === "number") { this.counters.peers = m.peers; this.sawNodeUp = true; }
       if (typeof m.mesh === "number") this.counters.mesh = m.mesh;
+      // Proxy the shared node's BLE bearer (Loam >= 0.0.41 sends `ble`). A client runs no mesh of its
+      // own, so without this it saw peers 0 over Bluetooth-only and showed "Not connected to Loam"
+      // while Bluetooth was carrying its sync. A nearby BLE peer counts as reachability.
+      const ble = m.ble;
+      if (ble && typeof ble === "object") {
+        this.blePeers = ble.peers || 0; this.bleArmed = !!ble.armed; this.bleForced = !!ble.forced;
+        this.counters.bleTx = ble.tx || 0; this.counters.bleRx = ble.rx || 0;
+        this.counters.bleRxDelivered = ble.delivered || 0; this.counters.bleRxDropped = ble.dropped || 0;
+        if (this.blePeers > 0 && (this.counters.mesh || 0) <= 0) this.counters.mesh = this.blePeers;
+      } else { this.blePeers = 0; }
       // Loam's NODE just came up (e.g. Loam started AFTER Scala bound the AIDL service). The service
       // stayed bound the whole time, so `logosDeliveryConnected` never fired and our topic subscribes —
       // sent while the node was down — never reached a running node. Re-apply them now, or the app is

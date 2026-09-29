@@ -170,7 +170,8 @@ export function serviceNoPeers(): boolean {
   return backend instanceof ServiceNode
     && !backend.isNodeDown()
     && !backend.isAwaitingApproval()
-    && counters.peers === 0;
+    && counters.peers === 0
+    && !(backend.blePeers > 0);   // Bluetooth-only is connected: Loam's mesh carries the sync
 }
 // Explicit "why isn't the shared node being used" diagnostic — surfaced in-app for debugging.
 let lastServiceError = "";
