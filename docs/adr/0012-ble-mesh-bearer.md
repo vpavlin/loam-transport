@@ -197,3 +197,23 @@ The **portable half is done and proven**; the native radio is written but awaits
 - Presence: expose "who's reachable over BLE" to apps, or keep the bearer invisible below sync?
   `meshPeers()` gives a count today; a per-peer presence signal is still open.
 - v2: topic-bloom forwarding + a Wi-Fi Aware bulk bearer behind the same `Bearer` interface.
+
+## Amendment (2026-09-29): portable bearer rules; native details moved to 0019
+
+The native radio section above ("UNVERIFIED", 4-byte header, lower-address tie-break) is superseded by
+[0019](0019-ble-link-protocol-v2.md) (wire format, fragment size, GATT sequencing) and
+[0014](0014-identity-first-ble-connections.md) (node-id routing). The open question about a stable
+per-node id is answered by 0014. Changes to the portable bearer:
+
+- **The seen-set is a 15 s window (`seenWindowMs`), not permanent.** A remember-forever set meant a
+  byte-identical re-send (every CRDT retry, and every catch-up re-serve of the same sealed event) was
+  never flooded again, so a phone that missed the first flood could never receive that event over BLE.
+  15 s is still long enough to stop flood loops.
+- **A local `send()` always broadcasts.** It records the frame id (so our own echo is dropped) but is never
+  suppressed by it. Only frames *received* again within the window are dropped.
+- **"Delivered via mesh" requires a peer in range.** `publishSealed` swallows the Waku error only if
+  `mesh.reachablePeers() > 0`. An armed mesh with nobody nearby used to report success, so the app never
+  re-queued a write that went nowhere.
+- **Arming is single-flight.** Overlapping `armMesh` calls share one attempt, and a failed start stops the
+  radio.
+- **Telemetry never uses the mesh** (`publishRaw` is Waku-only; see 0016).

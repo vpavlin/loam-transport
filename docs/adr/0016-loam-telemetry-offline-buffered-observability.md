@@ -68,3 +68,11 @@ Two false starts informed the decision:
   trivially locatable.
 - **Native C++ publisher first** — deferred; the Node companion delivers the same wire result now and is
   unit-testable, and the format is stable for a later native swap.
+
+## Amendment (2026-09-29)
+
+- **Telemetry is Waku-only.** `publishRaw` deliberately bypasses the BLE mesh, so diagnostics never compete
+  with app traffic on a BLE-only link. A BLE-only device buffers and flushes once the internet returns.
+- **It depends on the node running.** A Loam process restarted by a client bind runs no node (0010
+  amendment), so it publishes nothing until the UI opens.
+- For on-device debugging *without* the fleet, see the stats line and crash/breadcrumb report in 0019.

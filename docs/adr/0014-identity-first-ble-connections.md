@@ -89,3 +89,17 @@ it's pre-release and both devices update together.
 
 Sources: bitchat whitepaper & bitchat-android (`mesh/` package: `PeerManager`,
 `MeshConnectionTracker`, `BluetoothGattClient/ServerManager`).
+
+## Amendment (2026-09-29): see 0019
+
+Implemented and verified on hardware, with these changes (details in
+[0019](0019-ble-link-protocol-v2.md)):
+
+- **The wire node id is a hash**, `base64url(sha256(deviceId)[0..12])` (16 chars), not the raw
+  `deviceId`. The raw id didn't fit a minimum-MTU write.
+- **Three frame types:** `A` announce, `F` fragment, and a new `Q` announce-request that the peer answers
+  with `A`.
+- **Announce reliability (the risk above) is resolved** by asking, not by re-announcing: an anonymous link
+  gets a `Q` every 2.5 s and is dropped after 8 tries (about 20 s). The client announces only after the
+  serialized MTU → discover → CCCD chain completes.
+- **The seen-set** is a 15 s time window in the portable bearer (0012 amendment), not bitchat's LRU.
