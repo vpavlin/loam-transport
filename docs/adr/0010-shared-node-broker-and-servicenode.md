@@ -37,3 +37,18 @@ down, apps fall back to an embedded node (`serviceNodeDown()` / `launchSharedSer
   fallback.
 - Chat apps (liblogoschat) can't join this seam — they run a *different* node/protocol;
   true convergence there is a separate, lib-level effort.
+
+## Amendment (2026-09-29)
+
+- **Subscribe order.** The broker records a topic's owner **before** calling `node.subscribe`, and a failed
+  node subscribe is retried (`nodeSubPending`). Before this, an offline join left the topic with no owner,
+  so every BLE frame for it was dropped as "unowned".
+- **Known gap: a service with no node.** When Loam dies (a crash, or Android killing it), a client's bind
+  restarts the Loam *process* and the service answers, but the node lives in `App.tsx` and only starts
+  when the Loam UI opens. Clients look connected, their requests are buffered until `jsReady`, and nothing
+  syncs until someone opens Loam. The planned fix is to boot the node headlessly (a `boot()` shared by the
+  UI and a headless task that the service starts).
+
+**Review follow-up (2026-09-29):**
+- `RealNode.joinedTopics` holds only topics whose subscribe + channelCreate succeeded.
+- Topics requested before the node is ready, or whose join failed, sit in `pendingTopics`. They are joined right after settle and retried on every renew tick, so the broker's `nodeSubPending` retry and start-up joins actually take effect.

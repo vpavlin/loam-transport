@@ -49,3 +49,12 @@ Uses `WebSocket` (built into React Native — no native module, no extra dep) an
 - **Only unit-test the broker/mesh in Node** — done too (pure `bearer`/`broker` tests), but it can't
   exercise the *transport's* arm/disarm + the cross-process receive; the mock radio can.
 - **Hardware-only** — not repeatable, not CI-able, slow feedback.
+
+## Amendment (2026-09-29)
+
+- **The mock does not cover the native link protocol.** `WsMeshRadio` stands in for the whole radio, so it
+  exercises none of 0019: the A/Q/F frames, the announce handshake, fragment and MTU limits, the 512 B
+  attribute cap, or GATT sequencing. Every one of the 2026-09 BLE bugs lived there, so hardware remains
+  the gate for native changes.
+- Portable-bearer tests now assume a 15 s dedup window and always-broadcast local sends (0012 amendment).
+  `test/bearer.test.ts` covers re-send to a later neighbour, catch-up re-send, and window expiry.

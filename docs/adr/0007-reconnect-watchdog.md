@@ -26,3 +26,23 @@ conclude offline from one 0.")
 
 - Sync survives real-world mobile network changes.
 - Re-subscribe on redial re-applies the subscribe-before-channelCreate gate (ADR 0003).
+
+## Amendment (2026-09-29): never re-create the node; don't touch it offline
+
+- **Never re-create the node.** The Android implementation had grown into stop → `LogosMessaging.new()` →
+  start. On device, a second `new()` in the same process segfaults the native library (SIGSEGV within a
+  second of "node new"; the exit shows as `reason=SIGNALED status=11`). The breadcrumb trail proved it
+  (ADR 0019). Re-dial is now what this ADR originally said: `connect()` each entry node **on the live
+  node**. A node that failed to start stays down until the next app start.
+- **Skip re-dial and subscription renewal while offline.** Even on the live node, the once-a-minute re-dial
+  and subscription renewal on a device with no internet crashed natively too. Both now run only when Android
+  reports a network with **validated internet** (`LoamMesh.online()`); otherwise the trail records
+  `redial skipped: offline` / `renew skipped: offline`. Offline, nothing can be dialed anyway, and the BLE
+  mesh (0012/0019) carries the traffic.
+- **Correction to "Consequences":** sync survives network changes *once the internet is back*. While
+  offline, the watchdog deliberately does nothing.
+
+**Review follow-up (2026-09-29):**
+- Only a re-dial that actually dialed counts toward the backoff (45 s → 10 min). Offline skips don't, and a return to online resets it; the trail marks "offline" / "back online" once each.
+- A re-dial tries 2 random entry nodes with a 3 s timeout. `connect()` is a synchronous native call that holds the shared native-module thread.
+- A restart reuses the existing node context and never calls `new()` again.

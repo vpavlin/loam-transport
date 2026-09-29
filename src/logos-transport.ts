@@ -395,6 +395,9 @@ async function evaluateMesh(): Promise<void> {
 // A tick or a forceMesh() landing while `m.start()` is still awaiting would otherwise build a
 // second bearer + radio that nothing ever stops, delivering every frame twice.
 let arming: Promise<void> | null = null;
+// Bumped by every disarm: an arm whose radio start resolves AFTER a disarm must stop it, not install it
+// (else the radio runs forever with nothing that will ever stop it).
+let meshEpoch = 0;
 async function armMesh(): Promise<void> {
   if (mesh || !meshRadioFactory) return;
   if (arming) return arming;
@@ -403,6 +406,7 @@ async function armMesh(): Promise<void> {
 }
 async function armMeshNow(): Promise<void> {
   ensure();
+  const epoch = meshEpoch;
   const m = new BleMeshBearer(meshRadioFactory(), meshOpts);
   m.onReceive((f) => {
     counters.rxRaw++; counters.bleRx++;
@@ -410,9 +414,13 @@ async function armMeshNow(): Promise<void> {
     if (opened) { counters.rxNew++; counters.bleRxDelivered++; noteTopic(meshRxDeliv, f.topic); }
     else { counters.rxDup++; counters.bleRxDropped++; noteTopic(meshRxDrop, f.topic); }
   });
-  try { await m.start(); mesh = m; } catch { try { await m.stop(); } catch { /* */ } /* radio not ready — retry next tick */ }
+  try {
+    await m.start();
+    if (epoch !== meshEpoch) { try { await m.stop(); } catch { /* */ } return; }   // disarmed meanwhile
+    mesh = m;
+  } catch { try { await m.stop(); } catch { /* */ } /* radio not ready — retry next tick */ }
 }
-async function disarmMesh(): Promise<void> { const m = mesh; mesh = null; if (m) { try { await m.stop(); } catch { /* */ } } }
+async function disarmMesh(): Promise<void> { meshEpoch++; const m = mesh; mesh = null; if (m) { try { await m.stop(); } catch { /* */ } } }
 
 // Add topics after the node is up — via the tenant so the broker records ownership and
 // subscribes the underlying node exactly once per topic (refcounted).

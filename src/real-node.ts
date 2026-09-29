@@ -26,6 +26,9 @@ export interface RealNodeDeps {
   STORE_MAX_PAGES: number;
 }
 
+// Debug breadcrumb (Loam sets globalThis.__loamMark → a crash-surviving native trail file).
+const mark = (s: string) => { try { (globalThis as any).__loamMark?.(s); } catch { /* */ } };
+
 export class RealNode implements UnderlyingNode {
   private d: RealNodeDeps;
   private didSetup = false;
@@ -37,11 +40,25 @@ export class RealNode implements UnderlyingNode {
   // Peerless watchdog: peer-exchange can't recover from 0 peers (no peer to ask), and on mobile the
   // mesh also drops on doze / wifi↔cellular handoff. Poll peers; re-dial if peerless after connecting.
   private watchdogTimer: ReturnType<typeof setInterval> | null = null;
+  // Node maintenance (re-dial, subscription renewal) runs one job at a time: the two used to fire in the
+  // same second and the native node segfaulted ~1 s later, intermittently (on device, 2026-09-29).
+  private nodeJob: Promise<void> = Promise.resolve();
+  private exclusive(job: () => Promise<void>): Promise<void> {
+    const run = this.nodeJob.then(job, job);
+    this.nodeJob = run.catch(() => { /* */ });
+    return run;
+  }
+  // Re-dial gap: doubles while re-dialing doesn't bring peers (up to 10 min), resets once peers appear.
+  private redialGapMs = 45000;
+  private wasOffline = false;
+  // Topics asked for before the node was ready, or whose join failed: joined after settle and retried on
+  // each renew tick. (joinedTopics only ever holds topics whose subscribe + channelCreate succeeded, so a
+  // retry of a failed join isn't mistaken for "already joined".)
+  private pendingTopics = new Set<string>();
   private everConnected = false;
   private zeroPeerTicks = 0;
   private lastReconnectMs = 0;
   private reconnecting = false;
-  private reconnectFailed = false;   // last re-dial threw; the watchdog keeps retrying
   private deviceId = "";
   private route: (topic: string, payload: any) => boolean = () => false;
   readonly joinedTopics = new Set<string>();   // KYM `routes`
@@ -115,21 +132,34 @@ export class RealNode implements UnderlyingNode {
       if (!this.didSetup) { await LogosMessaging.setup(); this.didSetup = true; }
       const config = this.d.buildConfig();
       step("mode:" + (config && config.mode));
-      const c: string = await LogosMessaging.new(config);
+      // Reuse a node we already created (a start that failed after new(), or a restart after stop()):
+      // a second LogosMessaging.new() in the same process segfaults the native library.
+      let c: string = this.ctx;
+      if (!c) {
+        mark("node new mode=" + (config && config.mode));
+        c = await LogosMessaging.new(config);
+        mark("node new ok ctx=" + String(c).slice(-6));
+      } else mark("node restart ctx=" + String(c).slice(-6));
       this.ctx = c;
       step("Joining mesh…");
       await LogosMessaging.start(c);
+      mark("node started");
       // Subscribe + channelCreate every topic BEFORE the settle, so the mesh forms with
       // the channel/subscription already wired in (KYM's order — the bit I'd gotten wrong).
       for (const t of initialTopics) await this.joinRoute(c, t);
       step("Forming mesh…");
       await new Promise((r) => setTimeout(r, this.d.SETTLE_MS)); // settle AFTER join
       this.ready = true; // only now does the listener start processing (matches KYM)
+      await this.exclusive(() => this.joinPending());   // topics requested during start-up / settle
       if (this.renewTimer) clearInterval(this.renewTimer);
-      this.renewTimer = setInterval(() => {
+      this.renewTimer = setInterval(() => { this.exclusive(async () => {
         if (!this.ready) return;
-        for (const t of this.joinedTopics) LogosMessaging.subscribeContentTopic(this.ctx, t).catch(() => { /* next tick retries */ });
-      }, this.d.FILTER_RENEW_MS);
+        // Offline: skip (nothing to renew against; see reconnect() on offline native crashes).
+        if (!(await this.isOnline())) return;
+        mark(`renew ${this.joinedTopics.size} topics` + (this.pendingTopics.size ? ` (+${this.pendingTopics.size} pending)` : ""));
+        await this.joinPending();
+        for (const t of [...this.joinedTopics]) { try { await LogosMessaging.subscribeContentTopic(this.ctx, t); } catch { /* next tick retries */ } }
+      }).catch(() => { /* */ }); }, this.d.FILTER_RENEW_MS);
       // Arm the peerless watchdog (self-polls, so it works even if the app never calls refreshPeerInfo).
       this.everConnected = false; this.zeroPeerTicks = 0;
       if (this.watchdogTimer) clearInterval(this.watchdogTimer);
@@ -141,12 +171,19 @@ export class RealNode implements UnderlyingNode {
 
   // Add a topic after the node is up (KYM refreshRoutes) — subscribe+channelCreate.
   async subscribe(topic: string): Promise<void> {
-    const isNew = !this.joinedTopics.has(topic);
-    // Remember the topic even when the node isn't settled yet, so the settle/reconnect path
-    // (subscribeContentTopic over joinedTopics) picks it up when the fleet comes back — otherwise
-    // a topic joined during a BLE-only start is lost on Waku forever.
-    this.joinedTopics.add(topic);
-    if (this.ready && isNew) await this.joinRoute(this.ctx, topic);
+    if (this.joinedTopics.has(topic)) return;
+    // Not settled yet (or a BLE-only start): remember it; start() joins it after settle and the renew
+    // tick retries it, so it's never lost on the Waku side.
+    this.pendingTopics.add(topic);
+    if (!this.ready) return;
+    await this.exclusive(() => this.joinRoute(this.ctx, topic));   // throws on failure → caller retries
+    this.pendingTopics.delete(topic);
+  }
+  private async joinPending(): Promise<void> {
+    for (const t of [...this.pendingTopics]) {
+      if (this.joinedTopics.has(t)) { this.pendingTopics.delete(t); continue; }
+      try { await this.joinRoute(this.ctx, t); this.pendingTopics.delete(t); } catch { /* next renew tick */ }
+    }
   }
 
   // liblogosdelivery exposes unsubscribe in the FFI but it is not yet bridged in Kotlin;
@@ -188,10 +225,11 @@ export class RealNode implements UnderlyingNode {
   async stop(): Promise<void> {
     if (this.renewTimer) { clearInterval(this.renewTimer); this.renewTimer = null; }
     if (this.watchdogTimer) { clearInterval(this.watchdogTimer); this.watchdogTimer = null; }
-    this.joinedTopics.clear();
+    this.joinedTopics.clear(); this.pendingTopics.clear();
     if (this.ready && LogosMessaging) {
       const c = this.ctx;
       this.ready = false;
+      mark("node stop");
       try { await LogosMessaging.stop(c); } catch { /* ignore */ }
     }
   }
@@ -199,6 +237,7 @@ export class RealNode implements UnderlyingNode {
   // KYM storeSync — cursor-paged history pull over EVERY joined topic. Hands each stored
   // message's candidates to the app (which opens+folds) and returns {msgs, events, detail}.
   async storeSync(onCandidates: (topic: string, candidates: Uint8Array[]) => boolean): Promise<{ msgs: number; events: number; detail: string }> {
+    mark(`storeSync topics=${this.joinedTopics.size}`);
     if (!this.ready || typeof LogosMessaging.storeQuery !== "function") {
       this.storeInfo = "store: bridge missing (rebuild app)";
       return { msgs: 0, events: 0, detail: this.storeInfo };
@@ -250,43 +289,60 @@ export class RealNode implements UnderlyingNode {
   // after we've ever connected, a drop re-dials at ~30s. Either way the 45s cooldown prevents thrash.
   private async peerWatchdog(): Promise<void> {
     if (this.reconnecting) return;
-    // A failed re-dial leaves the node not-ready. Without this the watchdog returned early on every
-    // tick from then on, so a node that failed to restart while offline never came back when the
-    // internet did. Keep retrying on the same cooldown.
-    if (!this.ready) {
-      if (this.reconnectFailed && Date.now() - this.lastReconnectMs > 45000) { this.lastReconnectMs = Date.now(); await this.reconnect(); }
-      return;
-    }
+    if (!this.ready) return;   // not started (or start failed): nothing to re-dial on; never re-create the node
     await this.refreshPeerInfo();
     const peers = this.d.counters.peers;
-    if (peers > 0) { this.everConnected = true; this.zeroPeerTicks = 0; return; }
+    if (peers > 0) { this.everConnected = true; this.zeroPeerTicks = 0; this.redialGapMs = 45000; return; }
     if (peers !== 0) return; // -1 = metrics not read yet; don't count it as peerless
     const threshold = this.everConnected ? 3 : 6;   // ~30s after a drop, ~60s for the first connect
-    if (++this.zeroPeerTicks >= threshold && Date.now() - this.lastReconnectMs > 45000) {
-      this.lastReconnectMs = Date.now(); this.zeroPeerTicks = 0;
+    if (++this.zeroPeerTicks >= threshold && Date.now() - this.lastReconnectMs > this.redialGapMs) {
+      this.zeroPeerTicks = 0;
       try { console.warn(`[loam] mobile node peerless ~${threshold * 10}s (everConnected=${this.everConnected}) → re-dialing`); } catch { /* */ }
       await this.reconnect();
     }
   }
 
-  // Re-dial the fleet: stop → start (rebuilds the node from config's entryNodes) → re-join all topics.
+  // Re-dial the fleet on the LIVE node: connect() each entry node, then renew the subscriptions.
+  // Never stop + re-create the node: a second LogosMessaging.new() in the same process segfaults the
+  // native library (SIGSEGV within a second of "node new", seen on device every ~60-100 s offline).
   async reconnect(): Promise<void> {
-    if (this.reconnecting) return;
+    if (this.reconnecting || !this.ready || !this.ctx) return;
     this.reconnecting = true;
-    const topics = [...this.joinedTopics];
+    return this.exclusive(() => this.redial());
+  }
+  private async redial(): Promise<void> {
     try {
-      try { if (this.ctx) await LogosMessaging.stop(this.ctx); } catch { /* already down */ }
-      this.ready = false;
-      this.joinedTopics.clear();     // start() re-joins from the topics we pass it
-      await this.start(topics);      // re-new + re-start + re-join + re-arm timers (didSetup stays true → cheap)
-      this.reconnectFailed = false;
-    } catch {
-      // Leave not-ready; the watchdog retries (see peerWatchdog). Keep the topic list so the retry
-      // (or a later start) re-joins everything, not just what the failed attempt got to.
-      this.reconnectFailed = true;
-      for (const t of topics) this.joinedTopics.add(t);
+      const ctx = this.ctx;
+      if (!this.ready || !ctx) return;   // stopped while this job waited its turn
+      // Offline (no validated internet): skip. Dialing can't succeed, and a dial + subscription burst
+      // on an offline node crashed it natively (SIGSEGV ~1 s after "redial", on device, 2026-09-29).
+      // Skipping doesn't count as an attempt: the backoff grows only for dials that didn't help.
+      if (!(await this.isOnline())) return;
+      this.lastReconnectMs = Date.now();
+      this.redialGapMs = Math.min(this.redialGapMs * 2, 600000);   // reset to 45 s when peers appear
+      // Two random entry nodes, short timeout: connect() is a synchronous native call that holds the
+      // shared native-module thread (BLE sends, marks) while it waits.
+      const peers = [...this.d.entryNodes].sort(() => Math.random() - 0.5).slice(0, 2);
+      mark(`redial peerless -> ${peers.length} entry nodes`);
+      let ok = 0;
+      for (const peer of peers) {
+        try { await LogosMessaging.connect(ctx, peer, 3000); ok++; } catch { /* unreachable */ }
+      }
+      mark(`redial done ok=${ok}`);   // subscriptions are renewed by the regular renew tick
     }
     finally { this.reconnecting = false; }
+  }
+  // Validated internet per Android (LoamMesh.online). Unknown → online (only an explicit false skips).
+  // Marks the trail only on a change, and a return to online resets the re-dial backoff.
+  private async isOnline(): Promise<boolean> {
+    let online = true;
+    try { const f = (globalThis as any).__loamOnline; if (typeof f === "function") online = (await f()) !== false; } catch { /* */ }
+    if (online !== !this.wasOffline) {
+      mark(online ? "back online" : "offline: skipping re-dial and renew");
+      if (online) { this.redialGapMs = 45000; this.lastReconnectMs = 0; }
+      this.wasOffline = !online;
+    }
+    return online;
   }
 
   // KYM getPeerCount — sum ALL gossipsub-mesh gauges, parse shard(s), report peers/mesh.
