@@ -89,11 +89,12 @@ export function LoamDebug({
       "tx total": c.txTotal, "tx fail": c.txFail,
       "tx err": c.txErr || "—", "rx sample": safe(() => t.getRxSample()) || "—",
     }],
-    ["ble mesh (offline)", {
+    ["ble mesh", {
       armed: safe(() => t.meshEnabled()) ? "yes" : "no",
       "ble peers": safe(() => t.meshPeers()),
       forced: safe(() => t.meshForcedOn()) ? "yes" : "no",
       "ble tx": c.bleTx, "ble rx": c.bleRx,
+      "ble delivered": c.bleRxDelivered, "ble dropped": c.bleRxDropped,
     }],
   ];
   const tele = safe(() => (t as any).telemetryStatus?.()) as any;
