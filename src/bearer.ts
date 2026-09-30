@@ -9,7 +9,7 @@
 // This file is PORTABLE and phone-free: the BLE mesh gossip (seen-set, hop-TTL, forward)
 // runs over an abstract `MeshRadio`. Native BLE implements MeshRadio on the device; tests
 // implement it with an in-memory mesh (MockRadio) — no hardware, same logic.
-import { sha256 as sha256hash } from "@noble/hashes/sha2";
+import { sha256 as sha256hash } from "@noble/hashes/sha2.js";
 
 // ── Frame: a sealed sync frame as it travels a bearer ────────────────────────
 // `id` is a CONTENT hash (topic ‖ payload) so it is stable across bearers → the same

@@ -10,10 +10,10 @@
 // never pulls in expo-*/@noble. Ships CIPHERTEXT only; the node sealing its OWN telemetry with its OWN
 // key doesn't touch the transport's app-payload opacity.
 import * as FileSystem from "expo-file-system";
-import { hkdf } from "@noble/hashes/hkdf";
-import { hmac } from "@noble/hashes/hmac";
-import { sha256 } from "@noble/hashes/sha256";
-import { chacha20poly1305 } from "@noble/ciphers/chacha";
+import { hkdf } from "@noble/hashes/hkdf.js";
+import { hmac } from "@noble/hashes/hmac.js";
+import { sha256 } from "@noble/hashes/sha2.js";
+import { chacha20poly1305 } from "@noble/ciphers/chacha.js";
 import * as Crypto from "expo-crypto";
 import { counters, publishRaw, join, getNodeMode, meshEnabled, meshForcedOn, meshPeers } from "./logos-transport";
 
