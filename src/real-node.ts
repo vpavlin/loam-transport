@@ -234,10 +234,31 @@ export class RealNode implements UnderlyingNode {
     }
   }
 
-  // KYM storeSync — cursor-paged history pull over EVERY joined topic. Hands each stored
-  // message's candidates to the app (which opens+folds) and returns {msgs, events, detail}.
-  async storeSync(onCandidates: (topic: string, candidates: Uint8Array[]) => boolean): Promise<{ msgs: number; events: number; detail: string }> {
-    mark(`storeSync topics=${this.joinedTopics.size}`);
+  // Store (history) pulls. Each query is a synchronous native call that holds the shared native-module
+  // thread, so everything else (subscribing a room, sends, BLE) waits behind it. Pulls are therefore
+  // serialized, a topic pulled in the last STORE_FRESH_MS is skipped, each page asks at most
+  // STORE_PEERS_PER_PAGE store nodes with a short timeout, and nothing runs while offline. (Unbounded, a
+  // qaku join/foreground/refresh walked every app's topics x 6 peers x 20 s and a newly joined room's
+  // subscription waited minutes behind it — "no sync until I restart qaku".)
+  private storeChain: Promise<unknown> = Promise.resolve();
+  private storeFetchedAt = new Map<string, number>();
+  private static readonly STORE_FRESH_MS = 60_000;
+  private static readonly STORE_PEERS_PER_PAGE = 2;
+  private static readonly STORE_QUERY_TIMEOUT_MS = 8_000;
+
+  // Cursor-paged history pull over the given topics (default: every joined topic). Hands each stored
+  // message's candidates to onCandidates and returns {msgs, events, detail}.
+  storeSync(onCandidates: (topic: string, candidates: Uint8Array[]) => boolean, topics?: string[]): Promise<{ msgs: number; events: number; detail: string }> {
+    const run = this.storeChain.then(() => this.storeSyncNow(onCandidates, topics), () => this.storeSyncNow(onCandidates, topics));
+    this.storeChain = run.catch(() => { /* */ });
+    return run;
+  }
+  private async storeSyncNow(onCandidates: (topic: string, candidates: Uint8Array[]) => boolean, topics?: string[]): Promise<{ msgs: number; events: number; detail: string }> {
+    const now = Date.now();
+    const wanted = (topics ?? [...this.joinedTopics]).filter((t) => this.joinedTopics.has(t) && now - (this.storeFetchedAt.get(t) || 0) > RealNode.STORE_FRESH_MS);
+    mark(`storeSync ${wanted.length}/${(topics ?? [...this.joinedTopics]).length} topics`);
+    if (wanted.length === 0) return { msgs: 0, events: 0, detail: this.storeInfo || "store: up to date" };
+    if (!(await this.isOnline())) return { msgs: 0, events: 0, detail: "store: offline" };
     if (!this.ready || typeof LogosMessaging.storeQuery !== "function") {
       this.storeInfo = "store: bridge missing (rebuild app)";
       return { msgs: 0, events: 0, detail: this.storeInfo };
@@ -245,7 +266,8 @@ export class RealNode implements UnderlyingNode {
     const ctx = this.ctx;
     let totalMsgs = 0, totalEvents = 0;
     const parts: string[] = [];
-    for (const topic of this.joinedTopics) {
+    const peers = [...this.d.entryNodes].sort(() => Math.random() - 0.5).slice(0, RealNode.STORE_PEERS_PER_PAGE);
+    for (const topic of wanted) {
       const label = topic.slice(7, 15); // short hex of the content topic
       let cursor: any = undefined;
       let topicMsgs = 0, topicEvents = 0, note = "";
@@ -256,8 +278,8 @@ export class RealNode implements UnderlyingNode {
         };
         if (cursor) query.paginationCursor = cursor;
         let respStr: string | null = null;
-        for (const peer of this.d.entryNodes) { // ask each fleet node until one answers this page
-          try { respStr = await LogosMessaging.storeQuery(ctx, JSON.stringify(query), peer, this.d.STORE_TIMEOUT_MS); if (respStr) break; }
+        for (const peer of peers) { // ask a couple of fleet nodes until one answers this page
+          try { respStr = await LogosMessaging.storeQuery(ctx, JSON.stringify(query), peer, Math.min(this.d.STORE_TIMEOUT_MS, RealNode.STORE_QUERY_TIMEOUT_MS)); if (respStr) break; }
           catch { respStr = null; }
         }
         if (!respStr) { note = "no store peer answered"; break; }
@@ -275,6 +297,7 @@ export class RealNode implements UnderlyingNode {
         cursor = resp.paginationCursor ?? resp.pagination_cursor ?? resp.cursor;
         if (!cursor || msgs.length === 0) break; // last page
       }
+      if (note !== "no store peer answered") this.storeFetchedAt.set(topic, Date.now());
       totalMsgs += topicMsgs; totalEvents += topicEvents;
       parts.push(`${label}:${topicMsgs}m/${topicEvents}e${note ? `(${note})` : ""}`);
     }

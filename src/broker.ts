@@ -19,7 +19,7 @@ export interface UnderlyingNode {
   isReady(): boolean;
   // Optional cold-start history pull (waku_store_query) over the joined topics. Present on the real
   // node, absent on mocks/stubs. onCandidates(topic, candidates) is invoked per stored message.
-  storeSync?(onCandidates: (topic: string, candidates: Uint8Array[]) => boolean): Promise<{ msgs: number; events: number; detail: string }>;
+  storeSync?(onCandidates: (topic: string, candidates: Uint8Array[]) => boolean, topics?: string[]): Promise<{ msgs: number; events: number; detail: string }>;
 }
 
 export class SharedDeliveryNode {
@@ -93,10 +93,9 @@ export class SharedDeliveryNode {
     const t = this.tenants.get(tenantId);
     if (!t) return { msgs: 0, events: 0, detail: "no such tenant" };
     if (!this.node.storeSync) return { msgs: 0, events: 0, detail: "node has no store query" };
-    return this.node.storeSync((topic, candidates) => {
-      if (!this.owners.get(topic)?.has(tenantId)) return false; // only this tenant's topics
-      return t._deliver(topic, candidates as any);              // deliver like a live receive
-    });
+    // Only THIS tenant's topics are queried (a pull used to walk every app's topics). Results are routed
+    // to every owner like a live receive, so a pull coalesced with another app's request serves both.
+    return this.node.storeSync((topic, candidates) => this._route(topic, candidates as any), [...t.topics]);
   }
 
   // Returns true iff some owning tenant opened (decrypted) the message.
