@@ -52,3 +52,5 @@ down, apps fall back to an embedded node (`serviceNodeDown()` / `launchSharedSer
 **Review follow-up (2026-09-29):**
 - `RealNode.joinedTopics` holds only topics whose subscribe + channelCreate succeeded.
 - Topics requested before the node is ready, or whose join failed, sit in `pendingTopics`. They are joined right after settle and retried on every renew tick, so the broker's `nodeSubPending` retry and start-up joins actually take effect.
+
+**Headless boot shipped (2026-09-30, Loam 0.0.53, device-verified):** the node, service bridge and metrics now start from `boot()` at JS load (index.js), not from the UI. When a client binds and no JS is running, LogosDeliveryService starts the React context in the background and a long-lived `LoamBoot` headless task (RN pauses JS timers with no Activity or task). On Android 12+ the keep-alive foreground service starts only once the UI opens, because starting it from the background can be refused. The "service with no node" gap above is closed.
