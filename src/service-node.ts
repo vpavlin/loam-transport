@@ -15,7 +15,9 @@ const emitter = Client ? new NativeEventEmitter(Client) : null;
 export class ServiceNode implements UnderlyingNode {
   private appId: string;
   private counters: any;
-  private diag: any;
+  // Shared tx diagnostics object. NOT named `diag`: that is the diag() METHOD below, and an instance
+  // field of the same name shadowed it, so serviceDiag() threw "diag is not a function".
+  private txDiag: any;
   private ready = false;
   private route: (topic: string, payload: any) => boolean = () => false;
   private listenerAttached = false;
@@ -28,7 +30,7 @@ export class ServiceNode implements UnderlyingNode {
   blePeers = 0; bleArmed = false; bleForced = false;
   storeInfo = "store: via shared service";
 
-  constructor(opts: { appId: string; counters?: any; diag?: any }) { this.appId = opts.appId; this.counters = opts.counters; this.diag = opts.diag; }
+  constructor(opts: { appId: string; counters?: any; diag?: any }) { this.appId = opts.appId; this.counters = opts.counters; this.txDiag = opts.diag; }
 
   static available(): boolean { return !!Client; }
   setDeviceId(_id: string) { /* the shared service owns node identity */ }
@@ -99,15 +101,15 @@ export class ServiceNode implements UnderlyingNode {
   async unsubscribe(_topic: string): Promise<void> { /* service-side; no per-topic unsub yet */ }
 
   async send(topic: string, sealed: Uint8Array): Promise<void> {
-    if (!this.ready) { if (this.diag) this.diag.txErr = "node-null"; throw new Error("node-null"); }
+    if (!this.ready) { if (this.txDiag) this.txDiag.txErr = "node-null"; throw new Error("node-null"); }
     if (this.counters) this.counters.txAttempt = (this.counters.txAttempt || 0) + 1;
     try {
       await Client.send(topic, fromByteArray(sealed));
       if (this.counters) this.counters.txTotal = (this.counters.txTotal || 0) + 1;
-      if (this.diag) this.diag.txErr = "";
+      if (this.txDiag) this.txDiag.txErr = "";
     } catch (e: any) {
       if (this.counters) this.counters.txFail = (this.counters.txFail || 0) + 1;
-      if (this.diag) this.diag.txErr = String((e && (e.message || e.code)) || e).slice(0, 140);
+      if (this.txDiag) this.txDiag.txErr = String((e && (e.message || e.code)) || e).slice(0, 140);
       throw e;
     }
   }

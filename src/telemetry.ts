@@ -26,7 +26,7 @@ const BUF = (FileSystem.documentDirectory || "") + "loam-telemetry-buf.json";
 
 let enabled = false;
 let timer: ReturnType<typeof setInterval> | null = null;
-let Ke = new Uint8Array(32);
+let Ke: Uint8Array = new Uint8Array(32);
 let topic = "";
 let deviceId = "";
 let lastFlush = "";
