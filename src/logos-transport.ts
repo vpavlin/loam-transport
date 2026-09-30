@@ -412,7 +412,9 @@ async function armMesh(): Promise<void> {
 async function armMeshNow(): Promise<void> {
   ensure();
   const epoch = meshEpoch;
-  const m = new BleMeshBearer(meshRadioFactory(), meshOpts);
+  const factory = meshRadioFactory;
+  if (!factory) return;   // radio removed while this arm was queued
+  const m = new BleMeshBearer(factory(), meshOpts);
   m.onReceive((f) => {
     counters.rxRaw++; counters.bleRx++;
     const opened = shared ? shared._route(f.topic, [f.payload]) : false;

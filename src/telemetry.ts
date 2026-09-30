@@ -22,7 +22,11 @@ const HEXC = "0123456789abcdef";
 const hex = (b: Uint8Array) => { let s = ""; for (const x of b) s += HEXC[x >> 4] + HEXC[x & 15]; return s; };
 
 const CAP = 500;
-const BUF = (FileSystem.documentDirectory || "") + "loam-telemetry-buf.json";
+// Newer expo-file-system (SDK 54+) no longer exports documentDirectory from the main entry (it moved
+// to "expo-file-system/legacy", which older apps don't have). Persisting the buffer is best-effort:
+// without a directory it stays in memory only.
+const DOC_DIR: string = (FileSystem as any).documentDirectory || "";
+const BUF = DOC_DIR ? DOC_DIR + "loam-telemetry-buf.json" : "";
 
 let enabled = false;
 let timer: ReturnType<typeof setInterval> | null = null;
@@ -36,10 +40,11 @@ let loaded = false;
 
 async function load(): Promise<void> {
   if (loaded) return;
+  if (!BUF) { loaded = true; return; }
   try { const i = await FileSystem.getInfoAsync(BUF); if (i.exists) { const a = JSON.parse(await FileSystem.readAsStringAsync(BUF)); if (Array.isArray(a)) buf = a; } } catch { /* */ }
   loaded = true;
 }
-async function persist(): Promise<void> { try { await FileSystem.writeAsStringAsync(BUF, JSON.stringify(buf)); } catch { /* */ } }
+async function persist(): Promise<void> { if (!BUF) return; try { await FileSystem.writeAsStringAsync(BUF, JSON.stringify(buf)); } catch { /* */ } }
 
 function seal(plaintext: Uint8Array): Uint8Array {
   const nonce = Crypto.getRandomBytes(12);
