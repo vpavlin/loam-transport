@@ -14,6 +14,7 @@ import { RealNode } from "./real-node";
 import { ServiceNode } from "./service-node";
 import { BleMeshBearer, makeFrame } from "./bearer";
 import type { MeshRadio } from "./bearer";
+import { unwrapSingleSegment } from "./segment-compat";
 
 // Per-stage diagnostic counters (surface in a Sync card). rxOpened/rxOpenFail are the
 // app's open() outcome, reported back via onReceive's return value.
@@ -104,6 +105,18 @@ export function payloadCandidates(payload: any): Uint8Array[] {
       out.push(once);
       try { out.push(toByteArray(fromUtf8(once))); } catch { /* not double */ }
     } catch { /* not base64 */ }
+  }
+  // A desktop on delivery >= 0.3.0 (lib v0.39) wraps channel content in a LIP-243 SegmentMessage that
+  // our v0.38.1 library passes through: offer the unwrapped payload (and its base64 decodings) too.
+  for (const c of out.slice()) {
+    const inner = unwrapSingleSegment(c);
+    if (!inner) continue;
+    out.push(inner);
+    try {
+      const once = toByteArray(fromUtf8(inner));
+      out.push(once);
+      try { out.push(toByteArray(fromUtf8(once))); } catch { /* not double */ }
+    } catch { /* not base64 text */ }
   }
   return out;
 }
