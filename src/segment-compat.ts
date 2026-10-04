@@ -10,6 +10,7 @@
 // f2 originalPayloadLength, f3 index, f4 dataSegmentCount, f5 paritySegmentCount, f6 isParity,
 // f7 payload. proto3 omits defaults: a single segment carries no f3 and no f6.
 import { keccak_256 } from "@noble/hashes/sha3.js";
+import { toByteArray } from "base64-js";
 
 export interface Segment {
   ok: boolean; hash: Uint8Array; payload: Uint8Array;
@@ -65,4 +66,29 @@ export function unwrapSingleSegment(b: Uint8Array): Uint8Array | null {
   if (s.length !== s.payload.length) return null;
   if (!eq(keccak_256(s.payload), s.hash)) return null;
   return s.payload;
+}
+
+/**
+ * Add the unwrapped payload (and its single/double base64 decodings) for every candidate that is a
+ * v0.39 single-segment wrapper. Used on BOTH receive paths: the app's own node (payloadCandidates)
+ * and the shared Loam service (ServiceNode), whose service builds the candidates itself — so an
+ * app reads 0.3 desktops even when the phone's Loam app predates this.
+ */
+// Base64 text is ASCII, so bytes -> string needs no UTF-8 decoder (and no ./utf8 import, which the
+// node test runner can't resolve without an extension).
+const ascii = (b: Uint8Array): string => { let s = ""; for (let i = 0; i < b.length; i++) s += String.fromCharCode(b[i]); return s; };
+
+export function withUnwrappedSegments(cands: Uint8Array[]): Uint8Array[] {
+  const out = cands.slice();
+  for (const c of cands) {
+    const inner = unwrapSingleSegment(c);
+    if (!inner) continue;
+    out.push(inner);
+    try {
+      const once = toByteArray(ascii(inner));
+      out.push(once);
+      try { out.push(toByteArray(ascii(once))); } catch { /* not double */ }
+    } catch { /* not base64 text */ }
+  }
+  return out;
 }

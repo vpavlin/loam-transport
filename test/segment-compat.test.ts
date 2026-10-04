@@ -3,7 +3,7 @@
 import assert from "node:assert";
 import test from "node:test";
 import { keccak_256 } from "@noble/hashes/sha3.js";
-import { parseSegment, isSegmentWrapped, unwrapSingleSegment } from "../src/segment-compat.ts";
+import { parseSegment, isSegmentWrapped, unwrapSingleSegment, withUnwrappedSegments } from "../src/segment-compat.ts";
 
 const hex = (h: string) => Uint8Array.from(h.match(/../g)!.map((x) => parseInt(x, 16)));
 const H = "000102030405060708090A0B0C0D0E0F101112131415161718191A1B1C1D1E1F";
@@ -48,4 +48,14 @@ test("single segment round-trips; tampering and old content are left alone", () 
 test("a 300-byte payload (multi-block keccak) round-trips", () => {
   const p = enc.encode("x".repeat(300));
   assert.deepEqual(unwrapSingleSegment(wrapSingle(p)), p);
+});
+
+test("withUnwrappedSegments: the shared-service path recovers the app bytes from a forwarded wrapper", () => {
+  // what our apps put on the wire: base64 text of the sealed bytes (double-base64 convention)
+  const sealed = Uint8Array.from([0x00, 0xff, 0x10, 0x20, 0x7f, 0x80]);
+  const b64 = Buffer.from(sealed).toString("base64");
+  const wrapped = wrapSingle(enc.encode(b64));
+  const out = withUnwrappedSegments([wrapped]);
+  assert.ok(out.some((c) => c.length === sealed.length && c.every((v, i) => v === sealed[i])), "sealed bytes offered");
+  assert.equal(withUnwrappedSegments([sealed]).length, 1, "old-format candidates untouched");
 });

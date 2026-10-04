@@ -8,6 +8,7 @@
 import { NativeModules, NativeEventEmitter } from "react-native";
 import { fromByteArray, toByteArray } from "base64-js";
 import type { UnderlyingNode } from "./broker";
+import { withUnwrappedSegments } from "./segment-compat";
 
 const Client = (NativeModules as any).LogosDeliveryClient;
 const emitter = Client ? new NativeEventEmitter(Client) : null;
@@ -49,7 +50,8 @@ export class ServiceNode implements UnderlyingNode {
         const topic = m.topic || "";
         if (this.counters) this.counters.rxRaw = (this.counters.rxRaw || 0) + 1;
         const arr: string[] = m.candidatesJson ? JSON.parse(m.candidatesJson) : [];
-        const cands = arr.map((b64) => toByteArray(b64));
+        // withUnwrappedSegments: the service may predate segment-compat, so unwrap here too.
+        const cands = withUnwrappedSegments(arr.map((b64) => toByteArray(b64)));
         this.route(topic, cands);
       } catch { /* never throw in the listener */ }
     });
