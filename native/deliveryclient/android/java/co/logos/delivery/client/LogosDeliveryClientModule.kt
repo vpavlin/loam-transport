@@ -84,6 +84,18 @@ class LogosDeliveryClientModule(private val ctx: ReactApplicationContext) : Reac
   @ReactMethod fun send(topic: String, sealedB64: String) { try { svc?.send(appId, topic, Base64.decode(sealedB64, Base64.NO_WRAP)) } catch (_: Throwable) {} }
   // Fire-and-forget cold-start history pull — the service runs waku_store_query and pushes each
   // stored message back through the receive callback. Requires a Loam service that handles it.
+  // HD identity request to Loam (ADR 0001). Resolves with Loam's JSON answer; an older Loam without hdCall
+  // (unknown Binder transaction) resolves with {"error":"update Loam"} instead of hanging.
+  @ReactMethod fun hdCall(requestJson: String, promise: Promise) {
+    val s = svc
+    if (s == null) { promise.resolve("{\"error\":\"Loam not connected\"}"); return }
+    val done = java.util.concurrent.atomic.AtomicBoolean(false)
+    val cb = object : co.logos.delivery.IHdCallback.Stub() {
+      override fun onResult(resultJson: String) { if (done.compareAndSet(false, true)) promise.resolve(resultJson) }
+    }
+    try { s.hdCall(appId, requestJson, cb) }
+    catch (t: Throwable) { if (done.compareAndSet(false, true)) promise.resolve("{\"error\":\"update Loam (${t.javaClass.simpleName})\"}") }
+  }
   @ReactMethod fun requestStoreSync() { try { svc?.requestStoreSync(appId) } catch (_: Throwable) {} }
   @ReactMethod fun metrics(promise: Promise) { promise.resolve(try { svc?.metrics() ?: "{}" } catch (_: Throwable) { "{}" }) }
   @ReactMethod fun disconnect() { try { svc?.unregisterClient(appId); ctx.unbindService(conn) } catch (_: Throwable) {}; svc = null }

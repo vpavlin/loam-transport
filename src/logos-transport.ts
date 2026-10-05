@@ -178,6 +178,30 @@ export function serviceNoPeers(): boolean {
 }
 // Explicit "why isn't the shared node being used" diagnostic — surfaced in-app for debugging.
 let lastServiceError = "";
+// ---- identities held by Loam (loam-keycard ADR 0001) ----
+// One root in the Loam app → a separate identity per space (calendar, room, book…) plus one shared
+// "main" identity (contextId ""). Loam scopes every request to THIS app, so apps can't reach each
+// other's identities. Each returns {error} when there is no shared Loam node (the app runs its own
+// node or Loam is older) — callers then keep using their own local key.
+export type LoamIdentity = { address: string; pubHex: string; path: string };
+async function hd(req: object): Promise<any> {
+  ensure();
+  if (!(backend instanceof ServiceNode)) return { error: "no shared Loam node" };
+  return backend.hdCall(req);
+}
+/** {exists, mainAddress?, mainPubHex?} — whether the user has set up an identity in Loam. */
+export function loamIdentityStatus(): Promise<{ exists?: boolean; mainAddress?: string; mainPubHex?: string; error?: string }> {
+  return hd({ op: "status" });
+}
+/** The identity for a space (contextId), or the main identity for "". */
+export function loamIdentity(contextId: string): Promise<LoamIdentity | { error: string }> {
+  return hd({ op: "identity", contextId });
+}
+/** Sign a 32-byte hex digest → {sig: 64-byte r||s hex (low-S), pub, address}. */
+export function loamSign(contextId: string, digestHex: string): Promise<{ sig: string; pub: string; address: string } | { error: string }> {
+  return hd({ op: "sign", contextId, digestHex });
+}
+
 export async function serviceDiag(): Promise<string> {
   const avail = ServiceNode.available();
   const usingSvc = backend instanceof ServiceNode;

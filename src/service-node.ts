@@ -173,6 +173,13 @@ export class ServiceNode implements UnderlyingNode {
       }
     } catch { this.nodeDown = true; this.blePeers = 0; }
   }
+  // HD identity request to Loam (loam-keycard ADR 0001): Loam derives/signs in THIS app's namespace.
+  async hdCall(req: object, timeoutMs = 20000): Promise<any> {
+    if (!Client || typeof Client.hdCall !== "function") return { error: "update this app's Loam client" };
+    const answer: Promise<string> = Client.hdCall(JSON.stringify(req));
+    const timeout = new Promise<string>((res) => setTimeout(() => res('{"error":"Loam did not answer"}'), timeoutMs));
+    try { return JSON.parse(await Promise.race([answer, timeout])); } catch { return { error: "bad answer from Loam" }; }
+  }
   isAwaitingApproval(): boolean { return this.awaitingApproval; }
   async stop(): Promise<void> { this.ready = false; try { await Client.disconnect?.(); } catch { /* */ } }
 }
