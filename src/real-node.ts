@@ -9,6 +9,7 @@ import { NativeModules, NativeEventEmitter } from "react-native";
 import { fromByteArray, toByteArray } from "base64-js";
 import { utf8Bytes as utf8, utf8Decode as fromUtf8 } from "./utf8";
 import type { UnderlyingNode } from "./broker";
+import { sha256 } from "@noble/hashes/sha2.js";
 
 const { LogosMessaging } = NativeModules as any;
 const emitter = LogosMessaging ? new NativeEventEmitter(LogosMessaging) : null;
@@ -68,14 +69,27 @@ export class RealNode implements UnderlyingNode {
   constructor(deps: RealNodeDeps) { this.d = deps; }
 
   static available(): boolean { return !!LogosMessaging; }
-  setDeviceId(id: string) { this.deviceId = id; }
+  private senderSecret = "";
+  setDeviceId(id: string, senderSecret?: string) { this.deviceId = id; this.senderSecret = senderSecret || ""; }
+  // The SDS sender id, which goes on the wire IN THE CLEAR (sds protobuf field 7, plus other peers'
+  // causal-history entries). It used to be the deviceId for every topic, so all of a phone's apps
+  // and rooms shared one visible id, and the BLE id was a hash of it (ADR 0022). Now it is per topic
+  // and unlinkable without the secret: hex(sha256("loam-sds-sender-v1|" + secret + "|" + topic))[0..24].
+  // Stable across restarts for a topic (SDS keeps per-sender history). Without a secret, the
+  // deviceId stands in, which is still per topic but tied to an id old builds sent in the clear.
+  senderFor(topic: string): string {
+    const secret = this.senderSecret || this.deviceId;
+    const h = sha256(utf8("loam-sds-sender-v1|" + secret + "|" + topic));
+    let hex = ""; for (let i = 0; i < 12; i++) hex += h[i].toString(16).padStart(2, "0");
+    return hex;
+  }
   isReady(): boolean { return this.ready; }
   getCtx(): string { return this.ready ? this.ctx : ""; }
 
   // KYM joinRoute — subscribe THEN channelCreate. Uses the local ctx during bring-up.
   private async joinRoute(ctx: string, topic: string): Promise<void> {
     await LogosMessaging.subscribeContentTopic(ctx, topic);
-    await LogosMessaging.channelCreate(ctx, topic, topic, this.deviceId);
+    await LogosMessaging.channelCreate(ctx, topic, topic, this.senderFor(topic));
     this.joinedTopics.add(topic);
   }
 

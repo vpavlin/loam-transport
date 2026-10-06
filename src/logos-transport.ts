@@ -270,11 +270,13 @@ export function unregisterClient(appId: string, opts?: { hard?: boolean }): Prom
 // Bring the node up (or, if up, join new topics), then record topic ownership so the
 // broker routes those topics to this app's tenant.
 let deviceId = "";   // remembered so the telemetry feature can stamp snapshots without app plumbing
-export async function start(opts: { deviceId: string; topics: string[]; onReceive: OnReceive; onStatus?: OnStatus }): Promise<void> {
+// senderSecret: a random per-install secret that keys the per-topic SDS sender ids (ADR 0022). Pass
+// one; without it the deviceId keys them.
+export async function start(opts: { deviceId: string; senderSecret?: string; topics: string[]; onReceive: OnReceive; onStatus?: OnStatus }): Promise<void> {
   onReceiveCb = opts.onReceive;
   deviceId = opts.deviceId;
   ensure();
-  backend!.setDeviceId(opts.deviceId);
+  backend!.setDeviceId(opts.deviceId, opts.senderSecret);
   try {
     await backend!.start(opts.topics, opts.onStatus);
   } catch (e) {
@@ -284,7 +286,7 @@ export async function start(opts: { deviceId: string; topics: string[]; onReceiv
       lastServiceError = "start fell back: " + String((e as any)?.message || e);
       try { opts.onStatus && opts.onStatus("Shared node unavailable — using own node"); } catch { /* */ }
       wire(makeReal());
-      backend!.setDeviceId(opts.deviceId);
+      backend!.setDeviceId(opts.deviceId, opts.senderSecret);
       await backend!.start(opts.topics, opts.onStatus);
     } else { throw e; }
   }

@@ -34,7 +34,7 @@ export class ServiceNode implements UnderlyingNode {
   constructor(opts: { appId: string; counters?: any; diag?: any }) { this.appId = opts.appId; this.counters = opts.counters; this.txDiag = opts.diag; }
 
   static available(): boolean { return !!Client; }
-  setDeviceId(_id: string) { /* the shared service owns node identity */ }
+  setDeviceId(_id: string, _senderSecret?: string) { /* the shared service owns node identity */ }
   isReady(): boolean { return this.ready; }
   getCtx(): string { return this.ready ? "service" : ""; }
 
