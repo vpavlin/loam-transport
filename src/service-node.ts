@@ -8,6 +8,7 @@
 import { NativeModules, NativeEventEmitter } from "react-native";
 import { fromByteArray, toByteArray } from "base64-js";
 import type { UnderlyingNode } from "./broker";
+import { withUnwrappedSegments } from "./segment-compat";
 
 const Client = (NativeModules as any).LogosDeliveryClient;
 const emitter = Client ? new NativeEventEmitter(Client) : null;
@@ -33,7 +34,7 @@ export class ServiceNode implements UnderlyingNode {
   constructor(opts: { appId: string; counters?: any; diag?: any }) { this.appId = opts.appId; this.counters = opts.counters; this.txDiag = opts.diag; }
 
   static available(): boolean { return !!Client; }
-  setDeviceId(_id: string) { /* the shared service owns node identity */ }
+  setDeviceId(_id: string, _senderSecret?: string) { /* the shared service owns node identity */ }
   isReady(): boolean { return this.ready; }
   getCtx(): string { return this.ready ? "service" : ""; }
 
@@ -49,7 +50,8 @@ export class ServiceNode implements UnderlyingNode {
         const topic = m.topic || "";
         if (this.counters) this.counters.rxRaw = (this.counters.rxRaw || 0) + 1;
         const arr: string[] = m.candidatesJson ? JSON.parse(m.candidatesJson) : [];
-        const cands = arr.map((b64) => toByteArray(b64));
+        // withUnwrappedSegments: the service may predate segment-compat, so unwrap here too.
+        const cands = withUnwrappedSegments(arr.map((b64) => toByteArray(b64)));
         this.route(topic, cands);
       } catch { /* never throw in the listener */ }
     });
@@ -170,6 +172,13 @@ export class ServiceNode implements UnderlyingNode {
         for (const t of this.joinedTopics) { try { await Client.subscribe(t); } catch { /* */ } }
       }
     } catch { this.nodeDown = true; this.blePeers = 0; }
+  }
+  // HD identity request to Loam (loam-keycard ADR 0001): Loam derives/signs in THIS app's namespace.
+  async hdCall(req: object, timeoutMs = 20000): Promise<any> {
+    if (!Client || typeof Client.hdCall !== "function") return { error: "update this app's Loam client" };
+    const answer: Promise<string> = Client.hdCall(JSON.stringify(req));
+    const timeout = new Promise<string>((res) => setTimeout(() => res('{"error":"Loam did not answer"}'), timeoutMs));
+    try { return JSON.parse(await Promise.race([answer, timeout])); } catch { return { error: "bad answer from Loam" }; }
   }
   isAwaitingApproval(): boolean { return this.awaitingApproval; }
   async stop(): Promise<void> { this.ready = false; try { await Client.disconnect?.(); } catch { /* */ } }

@@ -42,7 +42,11 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
     const val T_ANNOUNCE = 0x41
     const val T_ANNOUNCE_REQ = 0x51
     const val T_FRAG = 0x46
-    const val WIRE_ID_BYTES = 12   // node id on the wire = base64url(sha256(deviceId)[0..12]) = 16 chars
+    const val WIRE_ID_BYTES = 12   // node id on the wire = base64url(12 random bytes) = 16 chars
+    // ADR 0022: the wire id is random and rotates, so a listener can't follow a phone across places.
+    // ~15 min matches Android's own address rotation (RPA); the jitter keeps phones from rotating in step.
+    const val ROTATE_BASE_MS = 15L * 60 * 1000
+    const val ROTATE_JITTER_MS = 5L * 60 * 1000
     const val REASM_TIMEOUT_MS = 30000L
     // Android caps one attribute value at 512 bytes whatever the MTU: a write/notify longer than that is
     // rejected by the peer (API < 33) or throws IllegalArgumentException (API 33+). MTU 517 allows 514.
@@ -107,14 +111,48 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
   @Volatile private var stDelivered = 0
   @Volatile private var stLastFrag = ""
   @Volatile private var stLastErr = ""
-  // Stable-identity layer (ADR 0014). Peers/routing/dedup/count are keyed by NODE ID, not the
-  // rotating BLE MAC — this collapses RPA "ghost" peers to one logical device. The node id is
-  // the app's stable deviceId, set by JS before start() and announced on every link.
-  @Volatile private var myNodeId: String = ""
-  // What we announce: a fixed 16-char hash of the node id. An announce is 1 + id bytes and has to
-  // fit one GATT write/notify (MTU - 3 = 20 bytes if MTU negotiation fails); the raw deviceId
-  // ("dev-…", ~24 chars) did not. Peers only use the id as an opaque key.
+  // Identity layer (ADR 0014, amended by 0022). Peers/routing/dedup/count are keyed by the id a peer
+  // ANNOUNCES on a link, not the BLE MAC — this collapses RPA "ghost" peers to one logical device.
+  // That id used to be a hash of the app's stable deviceId; the same deviceId is the Waku sender id,
+  // so anyone reading Waku traffic could recognise the phone over Bluetooth, forever (ADR 0022).
+  // Now it is RANDOM and ROTATES (rotateId): nothing on the radio outlives one epoch.
+  @Volatile private var myNodeId: String = ""   // the app's deviceId: logs only, never on the air
+  // What we announce: 16 chars (an announce is 1 + id bytes and has to fit one GATT write at the
+  // minimum MTU, 20 bytes). Peers only use it as an opaque key.
   @Volatile private var wireId: String = ""
+  private val rng = java.security.SecureRandom()
+  @Volatile private var running = false
+  private fun freshWireId(): String {
+    val b = ByteArray(WIRE_ID_BYTES); rng.nextBytes(b)
+    return Base64.encodeToString(b, Base64.NO_WRAP or Base64.NO_PADDING or Base64.URL_SAFE)
+  }
+  // New id + a full radio restart: links drop (a peer that kept a link could tie the old id to the
+  // new one), advertising restarts, the scanner re-dials. The sync layer re-sends what was in flight.
+  private val rotateId = object : Runnable {
+    override fun run() {
+      try {
+        val a = adapter
+        if (running && a != null && a.isEnabled) {
+          wireId = freshWireId()
+          Log.i(TAG, "rotate: new wire id ${wireId.take(6)}")
+          restartRadio(a)
+          emitPeers()
+        }
+      } catch (e: Exception) { Log.e(TAG, "rotateId", e); stLastErr = "rotate: ${e.message}" }
+      scheduleRotate()
+    }
+  }
+  private fun scheduleRotate() {
+    mainHandler.removeCallbacks(rotateId)
+    mainHandler.postDelayed(rotateId, ROTATE_BASE_MS + (rng.nextDouble() * ROTATE_JITTER_MS).toLong())
+  }
+  private fun restartRadio(a: BluetoothAdapter) {
+    stopInternal()
+    startServer(a)
+    startAdvertising(a)
+    startScanning(a)
+    mainHandler.postDelayed(announceRetry, ANNOUNCE_RETRY_MS)   // ADR 0014: ask until learned
+  }
   private val addrToNode = ConcurrentHashMap<String, String>()               // BLE address -> peer node id
   private val nodeToAddrs = ConcurrentHashMap<String, MutableSet<String>>()  // node id -> its link addresses
   private val reasmTime = ConcurrentHashMap<String, Long>()                  // reassembly key -> first-seen ms
@@ -157,13 +195,11 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
   }
 
   // ── JS API ────────────────────────────────────────────────────────────────
-  // Set our stable node id (the app's deviceId). MUST be called before start() so our first
-  // announce carries it. Idempotent.
+  // The app's deviceId. Kept for logs only: since ADR 0022 the id on the air is random (freshWireId),
+  // not derived from it. Idempotent.
   @ReactMethod fun setNodeId(id: String, promise: Promise) {
     myNodeId = id
-    val h = java.security.MessageDigest.getInstance("SHA-256").digest(id.toByteArray(Charsets.UTF_8)).copyOf(WIRE_ID_BYTES)
-    wireId = Base64.encodeToString(h, Base64.NO_WRAP or Base64.NO_PADDING or Base64.URL_SAFE)
-    Log.i(TAG, "nodeId=$id wire=$wireId"); promise.resolve(true)
+    Log.i(TAG, "nodeId set (not used on the air)"); promise.resolve(true)
   }
 
   @ReactMethod fun start(promise: Promise) {
@@ -171,21 +207,23 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
       val a = adapter ?: return promise.reject("no_bt", "no Bluetooth adapter")
       if (!a.isEnabled) return promise.reject("bt_off", "Bluetooth is off")
       Log.i(TAG, "start: ${Build.MANUFACTURER} ${Build.MODEL} api=${Build.VERSION.SDK_INT} peripheralAdvSupported=${a.isMultipleAdvertisementSupported} self=${a.address}")
-      stopInternal()   // idempotent: a start after a partial/failed start begins clean
-      startServer(a)
-      startAdvertising(a)
-      startScanning(a)
-      mainHandler.postDelayed(announceRetry, ANNOUNCE_RETRY_MS)   // ADR 0014: ask until learned
+      wireId = freshWireId()   // a new id on every start too (ADR 0022)
+      restartRadio(a)          // idempotent: a start after a partial/failed start begins clean
+      running = true
+      scheduleRotate()
       promise.resolve(true)
     } catch (e: Exception) {
       // e.g. SecurityException (Nearby devices denied) after the GATT server was already open: release
       // it, or every retry would open another server with a duplicate Loam service.
+      running = false; mainHandler.removeCallbacks(rotateId)
       try { stopInternal() } catch (_: Exception) {}
       promise.reject("start_fail", e.message, e)
     }
   }
 
   @ReactMethod fun stop(promise: Promise) {
+    running = false
+    mainHandler.removeCallbacks(rotateId)
     try { stopInternal(); promise.resolve(true) } catch (e: Exception) { promise.reject("stop_fail", e.message, e) }
   }
 

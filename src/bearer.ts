@@ -113,13 +113,28 @@ export class SeenSet {
 // Send = flood a frame to all neighbours. Receive = deliver locally ONCE (funnel up),
 // then store-carry-forward to the OTHER neighbours with hop-1, until hop runs out or the
 // seen-set kills it. Deliberately dumb — convergence is loam-sync's job, not the mesh's.
+//
+// Sender privacy (ADR 0022): a passive listener should not be able to tell which phone wrote a frame.
+// So a new frame does NOT always leave at the full TTL (a frame seen at the max hop would mark its
+// sender): it starts at ttl - random(0..originHopSpread). And every send, ours or a relay, waits a
+// random jitterMs delay, so "sent with no delay" doesn't mark the origin either (bitchat uses 10-220 ms).
+export interface MeshBearerOpts {
+  ttl?: number;                       // max hop count on the wire (default 7)
+  originHopSpread?: number;           // a new frame starts at ttl - random(0..spread) (default 2)
+  jitterMs?: [number, number];        // random delay before every send/relay (default [10, 220]; [0,0] = none)
+  seenCap?: number;
+  seenWindowMs?: number;
+  now?: () => number;
+  random?: () => number;              // injectable for tests (default Math.random)
+}
+
 export class BleMeshBearer implements Bearer {
   readonly name = "ble";
   private seen: SeenSet;
   private rxCb: (f: Frame) => void = () => {};
   private radio: MeshRadio;
-  private opts: { ttl?: number; seenCap?: number; seenWindowMs?: number; now?: () => number };
-  constructor(radio: MeshRadio, opts: { ttl?: number; seenCap?: number; seenWindowMs?: number; now?: () => number } = {}) {
+  private opts: MeshBearerOpts;
+  constructor(radio: MeshRadio, opts: MeshBearerOpts = {}) {
     this.radio = radio;
     this.opts = opts;
     this.seen = new SeenSet(opts.seenCap ?? 4096, opts.seenWindowMs ?? 15_000, opts.now);
@@ -137,8 +152,10 @@ export class BleMeshBearer implements Bearer {
   // catch-up reply to a newcomer). Recording the id kills our own echo coming back.
   async send(frame: Frame): Promise<void> {
     this.seen.add(frame.id);
-    const ttl = this.opts.ttl ?? 6;
-    this._broadcastExcept(null, { ...frame, hop: ttl });
+    const ttl = this.opts.ttl ?? 7;
+    const spread = Math.max(0, Math.min(this.opts.originHopSpread ?? 2, ttl - 1));
+    const hop = ttl - Math.floor(this._rand() * (spread + 1));
+    this._later(() => this._broadcastExcept(null, { ...frame, hop }));
   }
 
   private _onRadio(fromPeer: string, bytes: Uint8Array): void {
@@ -146,7 +163,18 @@ export class BleMeshBearer implements Bearer {
     if (!f || this.seen.has(f.id)) return; // malformed, loop, or already delivered
     this.seen.add(f.id);
     try { this.rxCb(f); } catch { /* deliver locally; never let a consumer kill the mesh */ }
-    if (f.hop > 1) this._broadcastExcept(fromPeer, { ...f, hop: f.hop - 1 }); // carry-forward
+    const ttl = this.opts.ttl ?? 7;
+    // carry-forward; a hop above our own TTL is clamped so one peer can't make a frame flood further
+    if (f.hop > 1) { const hop = Math.min(f.hop, ttl) - 1; this._later(() => this._broadcastExcept(fromPeer, { ...f, hop })); }
+  }
+
+  private _rand(): number { return (this.opts.random ?? Math.random)(); }
+  // Run fn after a random jitter delay (immediately when jitter is [0,0], e.g. in tests).
+  private _later(fn: () => void): void {
+    const [lo, hi] = this.opts.jitterMs ?? [10, 220];
+    const ms = hi <= 0 ? 0 : lo + this._rand() * Math.max(0, hi - lo);
+    if (ms <= 0) { fn(); return; }
+    setTimeout(() => { try { fn(); } catch { /* a radio error must not escape a timer */ } }, ms);
   }
 
   private _broadcastExcept(exceptPeer: string | null, f: Frame): void {

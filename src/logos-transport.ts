@@ -14,6 +14,7 @@ import { RealNode } from "./real-node";
 import { ServiceNode } from "./service-node";
 import { BleMeshBearer, makeFrame } from "./bearer";
 import type { MeshRadio } from "./bearer";
+import { withUnwrappedSegments } from "./segment-compat";
 
 // Per-stage diagnostic counters (surface in a Sync card). rxOpened/rxOpenFail are the
 // app's open() outcome, reported back via onReceive's return value.
@@ -105,7 +106,9 @@ export function payloadCandidates(payload: any): Uint8Array[] {
       try { out.push(toByteArray(fromUtf8(once))); } catch { /* not double */ }
     } catch { /* not base64 */ }
   }
-  return out;
+  // A desktop on delivery >= 0.3.0 (lib v0.39) wraps channel content in a LIP-243 SegmentMessage that
+  // our v0.38.1 library passes through: offer the unwrapped payload (and its base64 decodings) too.
+  return withUnwrappedSegments(out);
 }
 
 // ---- the one node, behind the broker seam ----
@@ -175,6 +178,30 @@ export function serviceNoPeers(): boolean {
 }
 // Explicit "why isn't the shared node being used" diagnostic — surfaced in-app for debugging.
 let lastServiceError = "";
+// ---- identities held by Loam (loam-keycard ADR 0001) ----
+// One root in the Loam app → a separate identity per space (calendar, room, book…) plus one shared
+// "main" identity (contextId ""). Loam scopes every request to THIS app, so apps can't reach each
+// other's identities. Each returns {error} when there is no shared Loam node (the app runs its own
+// node or Loam is older) — callers then keep using their own local key.
+export type LoamIdentity = { address: string; pubHex: string; path: string };
+async function hd(req: object): Promise<any> {
+  ensure();
+  if (!(backend instanceof ServiceNode)) return { error: "no shared Loam node" };
+  return backend.hdCall(req);
+}
+/** {exists, mainAddress?, mainPubHex?} — whether the user has set up an identity in Loam. */
+export function loamIdentityStatus(): Promise<{ exists?: boolean; mainAddress?: string; mainPubHex?: string; error?: string }> {
+  return hd({ op: "status" });
+}
+/** The identity for a space (contextId), or the main identity for "". */
+export function loamIdentity(contextId: string): Promise<LoamIdentity | { error: string }> {
+  return hd({ op: "identity", contextId });
+}
+/** Sign a 32-byte hex digest → {sig: 64-byte r||s hex (low-S), pub, address}. */
+export function loamSign(contextId: string, digestHex: string): Promise<{ sig: string; pub: string; address: string } | { error: string }> {
+  return hd({ op: "sign", contextId, digestHex });
+}
+
 export async function serviceDiag(): Promise<string> {
   const avail = ServiceNode.available();
   const usingSvc = backend instanceof ServiceNode;
@@ -243,11 +270,13 @@ export function unregisterClient(appId: string, opts?: { hard?: boolean }): Prom
 // Bring the node up (or, if up, join new topics), then record topic ownership so the
 // broker routes those topics to this app's tenant.
 let deviceId = "";   // remembered so the telemetry feature can stamp snapshots without app plumbing
-export async function start(opts: { deviceId: string; topics: string[]; onReceive: OnReceive; onStatus?: OnStatus }): Promise<void> {
+// senderSecret: a random per-install secret that keys the per-topic SDS sender ids (ADR 0022). Pass
+// one; without it the deviceId keys them.
+export async function start(opts: { deviceId: string; senderSecret?: string; topics: string[]; onReceive: OnReceive; onStatus?: OnStatus }): Promise<void> {
   onReceiveCb = opts.onReceive;
   deviceId = opts.deviceId;
   ensure();
-  backend!.setDeviceId(opts.deviceId);
+  backend!.setDeviceId(opts.deviceId, opts.senderSecret);
   try {
     await backend!.start(opts.topics, opts.onStatus);
   } catch (e) {
@@ -257,7 +286,7 @@ export async function start(opts: { deviceId: string; topics: string[]; onReceiv
       lastServiceError = "start fell back: " + String((e as any)?.message || e);
       try { opts.onStatus && opts.onStatus("Shared node unavailable — using own node"); } catch { /* */ }
       wire(makeReal());
-      backend!.setDeviceId(opts.deviceId);
+      backend!.setDeviceId(opts.deviceId, opts.senderSecret);
       await backend!.start(opts.topics, opts.onStatus);
     } else { throw e; }
   }

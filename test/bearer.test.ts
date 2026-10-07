@@ -41,7 +41,7 @@ class MockRadio implements MeshRadio {
 // A node = a BleMeshBearer over one radio, collecting the frames it delivers locally.
 async function node(mesh: MockMesh, id: string, ttl = 6) {
   const radio = new MockRadio(mesh, id);
-  const bearer = new BleMeshBearer(radio, { ttl });
+  const bearer = new BleMeshBearer(radio, { ttl, originHopSpread: 0, jitterMs: [0, 0] });
   const rx: Frame[] = [];
   bearer.onReceive((f) => rx.push(f));
   await bearer.start();
@@ -188,7 +188,7 @@ test("loops die within the seen window; after it expires the frame can flood aga
   const mesh = new MockMesh();
   let t = 0;
   const mk = async (id: string) => {
-    const bearer = new BleMeshBearer(new MockRadio(mesh, id), { ttl: 6, seenWindowMs: 30_000, now: () => t });
+    const bearer = new BleMeshBearer(new MockRadio(mesh, id), { ttl: 6, originHopSpread: 0, jitterMs: [0, 0], seenWindowMs: 30_000, now: () => t });
     const rx: Frame[] = []; bearer.onReceive((f) => rx.push(f)); await bearer.start();
     return { bearer, rx };
   };
@@ -200,4 +200,47 @@ test("loops die within the seen window; after it expires the frame can flood aga
   t += 31_000;
   await a.bearer.send(f);                 // e.g. a catch-up re-send a minute later
   assert.strictEqual(b.rx.length, 2); assert.strictEqual(c.rx.length, 2);  // delivered again, once each
+});
+
+// ── sender privacy (ADR 0022) ────────────────────────────────────────────────
+// A capturing radio: records what goes on the air, with no neighbours behind it.
+class TapRadio implements MeshRadio {
+  sent: Uint8Array[] = [];
+  cb: (peer: string, bytes: Uint8Array) => void = () => {};
+  async start() {}
+  async stop() {}
+  peers() { return ["n1", "n2"]; }
+  sendTo(_p: string, bytes: Uint8Array) { this.sent.push(bytes); }
+  onReceiveFrom(cb: (peer: string, bytes: Uint8Array) => void) { this.cb = cb; }
+}
+
+test("a new frame leaves at a random hop in [ttl-spread, ttl], not always at ttl", async () => {
+  const seen = new Set<number>();
+  for (const r of [0, 0.34, 0.67, 0.99]) {
+    const radio = new TapRadio();
+    const b = new BleMeshBearer(radio, { ttl: 7, originHopSpread: 2, jitterMs: [0, 0], random: () => r });
+    await b.start();
+    await b.send(makeFrame("/t/1", P("x" + r)));
+    seen.add(decodeFrame(radio.sent[0])!.hop);
+  }
+  assert.deepEqual([...seen].sort(), [5, 6, 7]);
+});
+
+test("a relay clamps an oversized hop to its own TTL", async () => {
+  const radio = new TapRadio();
+  const b = new BleMeshBearer(radio, { ttl: 7, jitterMs: [0, 0] });
+  await b.start();
+  radio.cb("n1", encodeFrame({ ...makeFrame("/t/1", P("big")), hop: 200 }));
+  assert.equal(radio.sent.length, 1, "forwarded to the other neighbour only");
+  assert.equal(decodeFrame(radio.sent[0])!.hop, 6);
+});
+
+test("sends and relays wait a jitter delay instead of going out at once", async () => {
+  const radio = new TapRadio();
+  const b = new BleMeshBearer(radio, { ttl: 7, jitterMs: [20, 40] });
+  await b.start();
+  await b.send(makeFrame("/t/1", P("later")));
+  assert.equal(radio.sent.length, 0, "nothing on the air synchronously");
+  await new Promise((r) => setTimeout(r, 80));
+  assert.equal(radio.sent.length, 2, "flooded to both neighbours after the delay");
 });

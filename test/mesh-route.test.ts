@@ -45,7 +45,7 @@ function makePhone(id: string) {
   const node = stubNode();
   const broker = new SharedDeliveryNode(node as any);
   const radio = new LinkedRadio(id);
-  const mesh = new BleMeshBearer(radio);
+  const mesh = new BleMeshBearer(radio, { originHopSpread: 0, jitterMs: [0, 0] });
   // armMesh receive (logos-transport.ts:326) — funnel BLE frames into the SAME broker route:
   mesh.onReceive((f: Frame) => { broker._route(f.topic, [f.payload]); });
   return { node, broker, radio, mesh };
