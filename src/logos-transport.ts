@@ -6,6 +6,7 @@
 // Swapping RealNode for a device-wide shared-delivery service later is the only change.
 // The proven bring-up (join-before-settle), the listener, storeSync and the double-base64
 // send were moved into RealNode VERBATIM — see real-node.ts. This file is the public shim.
+import { Receivers } from "./receivers";
 import { fromByteArray, toByteArray } from "base64-js";
 import { sha256 as sha256hash } from "@noble/hashes/sha2.js";
 import { utf8Bytes as utf8, utf8Decode as fromUtf8 } from "./utf8";
@@ -116,7 +117,7 @@ export function payloadCandidates(payload: any): Uint8Array[] {
 // default, or ServiceNode (bind the device-wide shared service over AIDL) when a client app
 // opts in via preferServiceBackend() and the client native module is present. A single-app
 // consumer uses start()/join()/publishSealed(); the SERVICE uses registerClient() per tenant.
-let onReceiveCb: OnReceive | null = null;
+const receivers = new Receivers();
 let preferService = false;
 let clientAppId = "app";
 let started = false;
@@ -145,7 +146,7 @@ function wire(b: RealNode | ServiceNode) {
   shared = new SharedDeliveryNode(backend);
   // the app's single tenant opens (decrypts) via onReceive and reports back.
   tenant = shared.registerTenant("app").onMessage(
-    (topic: string, cands: Uint8Array[]) => (onReceiveCb ? onReceiveCb(topic, cands) : false),
+    (topic: string, cands: Uint8Array[]) => receivers.dispatch(topic, cands),
   );
 }
 function ensure() {
@@ -273,7 +274,16 @@ let deviceId = "";   // remembered so the telemetry feature can stamp snapshots 
 // senderSecret: a random per-install secret that keys the per-topic SDS sender ids (ADR 0022). Pass
 // one; without it the deviceId keys them.
 export async function start(opts: { deviceId: string; senderSecret?: string; topics: string[]; onReceive: OnReceive; onStatus?: OnStatus }): Promise<void> {
-  onReceiveCb = opts.onReceive;
+  receivers.add(opts.onReceive);
+  // A second engine in the same app (see ./receivers.ts): the node is up or coming up, so only add its topics.
+  if (starting) { try { await starting; } catch { /* the first start's error is its caller's */ } }
+  if (running) { await join(opts.topics); return; }
+  starting = startOnce(opts);
+  try { await starting; } finally { starting = null; }
+}
+let starting: Promise<void> | null = null;
+let running = false;   // up and not stopped: a later start() only joins; after stop() it starts again
+async function startOnce(opts: { deviceId: string; senderSecret?: string; topics: string[]; onStatus?: OnStatus }): Promise<void> {
   deviceId = opts.deviceId;
   ensure();
   backend!.setDeviceId(opts.deviceId, opts.senderSecret);
@@ -291,7 +301,7 @@ export async function start(opts: { deviceId: string; senderSecret?: string; top
     } else { throw e; }
   }
   shared!._adopt("app", opts.topics);   // the single tenant owns the initial topics (no reliance on join())
-  started = true;                        // lock the backend choice; preferServiceBackend re-wires only pre-start
+  started = true; running = true;        // lock the backend choice; preferServiceBackend re-wires only pre-start
 }
 
 // ---- telemetry (offline-buffered node diagnostics) — a transport FEATURE, see ./telemetry.ts ----
@@ -471,7 +481,7 @@ export async function join(topics: string[]): Promise<void> {
   for (const t of topics) if (!tenant!.topics.has(t)) await tenant!.subscribe(t);
 }
 
-export async function stop(): Promise<void> { if (backend) await backend.stop(); }
+export async function stop(): Promise<void> { running = false; if (backend) await backend.stop(); }
 
 export function storeSync(onCandidates: (topic: string, candidates: Uint8Array[]) => boolean) {
   ensure(); return backend!.storeSync(onCandidates);
