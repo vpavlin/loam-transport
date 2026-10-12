@@ -1,5 +1,5 @@
 // The receivers of the single-app API (start()/join()). Several engines can live in one app
-// (Frequencies runs Scala's sync and Kith's sync), and each calls start() with its own onReceive.
+// (Freequencies runs Scala's sync and Kith's sync), and each calls start() with its own onReceive.
 // Each receiver opens only the topics it owns and returns false for the rest, so an incoming
 // message is offered to every receiver until one opens it.
 export type Receiver = (topic: string, candidates: Uint8Array[]) => boolean;
