@@ -5,6 +5,7 @@
 // the KYM-mirror transport — not paraphrased — so behaviour is byte-for-byte unchanged.
 // The only structural change: received messages are handed to a broker `route()` instead
 // of opened inline, and the node handle lives on the instance instead of a module global.
+import { isRelayTopic } from "./relay-topics";
 import { NativeModules, NativeEventEmitter } from "react-native";
 import { fromByteArray, toByteArray } from "base64-js";
 import { utf8Bytes as utf8, utf8Decode as fromUtf8 } from "./utf8";
@@ -86,10 +87,11 @@ export class RealNode implements UnderlyingNode {
   isReady(): boolean { return this.ready; }
   getCtx(): string { return this.ready ? this.ctx : ""; }
 
-  // KYM joinRoute — subscribe THEN channelCreate. Uses the local ctx during bring-up.
+  // KYM joinRoute — subscribe THEN channelCreate. Uses the local ctx during bring-up. A relay topic
+  // (relay-topics.ts) is only subscribed: no SDS channel, so none of its per-message overhead.
   private async joinRoute(ctx: string, topic: string): Promise<void> {
     await LogosMessaging.subscribeContentTopic(ctx, topic);
-    await LogosMessaging.channelCreate(ctx, topic, topic, this.senderFor(topic));
+    if (!isRelayTopic(topic)) await LogosMessaging.channelCreate(ctx, topic, topic, this.senderFor(topic));
     this.joinedTopics.add(topic);
   }
 
@@ -212,7 +214,12 @@ export class RealNode implements UnderlyingNode {
     const sealedB64 = fromByteArray(sealed);
     const doubled = fromByteArray(utf8(sealedB64));
     try {
-      await LogosMessaging.channelSend(this.ctx, topic, JSON.stringify({ payload: doubled, ephemeral: false }));
+      // A relay topic: the same double-base64 payload as a plain relay message, NOT ephemeral (store
+      // nodes keep it, so a peer that was away can pull it). Otherwise the SDS channel.
+      if (isRelayTopic(topic))
+        await LogosMessaging.send(this.ctx, JSON.stringify({ contentTopic: topic, payload: doubled, ephemeral: false }));
+      else
+        await LogosMessaging.channelSend(this.ctx, topic, JSON.stringify({ payload: doubled, ephemeral: false }));
       counters.txTotal++;
     } catch (e: any) {
       counters.txFail++;

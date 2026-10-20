@@ -488,3 +488,6 @@ export function storeSync(onCandidates: (topic: string, candidates: Uint8Array[]
 }
 
 export function refreshPeerInfo(): Promise<void> { ensure(); return backend!.refreshPeerInfo(); }
+
+// Per-topic plain relay instead of SDS channels (relay-topics.ts): Scala by default.
+export { setTopicMode, isRelayTopic } from "./relay-topics";
