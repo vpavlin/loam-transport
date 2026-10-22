@@ -10,6 +10,7 @@ import { NativeModules, NativeEventEmitter } from "react-native";
 import { fromByteArray, toByteArray } from "base64-js";
 import { utf8Bytes as utf8, utf8Decode as fromUtf8 } from "./utf8";
 import type { UnderlyingNode } from "./broker";
+import { rxMeta, type RxMeta } from "./broker";
 import { sha256 } from "@noble/hashes/sha2.js";
 
 const { LogosMessaging } = NativeModules as any;
@@ -62,7 +63,7 @@ export class RealNode implements UnderlyingNode {
   private lastReconnectMs = 0;
   private reconnecting = false;
   private deviceId = "";
-  private route: (topic: string, payload: any) => boolean = () => false;
+  private route: (topic: string, payload: any, meta?: RxMeta) => boolean = () => false;
   readonly joinedTopics = new Set<string>();   // KYM `routes`
   private storeReqSeq = 0;
   storeInfo = "";
@@ -98,7 +99,7 @@ export class RealNode implements UnderlyingNode {
   // KYM startReceiving — register the ONE listener. Gated on `ready` (set after settle),
   // exactly like KYM, so messages during the settle window are dropped. Crypto-agnostic:
   // hands candidates to the broker route() instead of opening inline.
-  onReceive(route: (topic: string, payload: any) => boolean): void {
+  onReceive(route: (topic: string, payload: any, meta?: RxMeta) => boolean): void {
     this.route = route;
     if (this.listenerAttached || !emitter) return;
     this.listenerAttached = true;
@@ -122,7 +123,9 @@ export class RealNode implements UnderlyingNode {
         counters.rxSeen++;
         const topic = m.contentTopic || m.channelId || (wm && wm.contentTopic) || "";
         const cands = this.d.payloadCandidates(payload);
-        const opened = this.route(topic, cands);
+        // Network timestamp (ns) only from the WakuMessage itself; an event-level time could be local.
+        const net = (m.wakuMessage || m.message) ? (m.wakuMessage || m.message).timestamp : 0;
+        const opened = this.route(topic, cands, rxMeta(net, m.source, "delivery"));
         if (opened) { counters.rxOpened++; return; }
         counters.rxOpenFail++;
         if (!diag.sample) {
@@ -269,12 +272,12 @@ export class RealNode implements UnderlyingNode {
 
   // Cursor-paged history pull over the given topics (default: every joined topic). Hands each stored
   // message's candidates to onCandidates and returns {msgs, events, detail}.
-  storeSync(onCandidates: (topic: string, candidates: Uint8Array[]) => boolean, topics?: string[]): Promise<{ msgs: number; events: number; detail: string }> {
+  storeSync(onCandidates: (topic: string, candidates: Uint8Array[], meta?: RxMeta) => boolean, topics?: string[]): Promise<{ msgs: number; events: number; detail: string }> {
     const run = this.storeChain.then(() => this.storeSyncNow(onCandidates, topics), () => this.storeSyncNow(onCandidates, topics));
     this.storeChain = run.catch(() => { /* */ });
     return run;
   }
-  private async storeSyncNow(onCandidates: (topic: string, candidates: Uint8Array[]) => boolean, topics?: string[]): Promise<{ msgs: number; events: number; detail: string }> {
+  private async storeSyncNow(onCandidates: (topic: string, candidates: Uint8Array[], meta?: RxMeta) => boolean, topics?: string[]): Promise<{ msgs: number; events: number; detail: string }> {
     const now = Date.now();
     const wanted = (topics ?? [...this.joinedTopics]).filter((t) => this.joinedTopics.has(t) && now - (this.storeFetchedAt.get(t) || 0) > RealNode.STORE_FRESH_MS);
     mark(`storeSync ${wanted.length}/${(topics ?? [...this.joinedTopics]).length} topics`);
@@ -313,7 +316,7 @@ export class RealNode implements UnderlyingNode {
           const wm = entry.message || entry.wakuMessage || entry;
           const payload = wm && wm.payload != null ? wm.payload : entry.payload;
           if (payload == null) continue;
-          if (onCandidates(topic, this.d.payloadCandidates(payload))) topicEvents++;
+          if (onCandidates(topic, this.d.payloadCandidates(payload), rxMeta(wm && wm.timestamp, "history", "delivery"))) topicEvents++;
         }
         cursor = resp.paginationCursor ?? resp.pagination_cursor ?? resp.cursor;
         if (!cursor || msgs.length === 0) break; // last page
