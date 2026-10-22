@@ -15,4 +15,9 @@ interface ILogosDelivery {
     // HD identities (loam-keycard ADR 0001), APPENDED. requestJson = {op:"status"} | {op:"identity", contextId}
     // | {op:"sign", contextId, digestHex}; contextId "" = the main identity. The answer comes on cb.
     void hdCall(String appId, String requestJson, IHdCallback cb);
+    // Network timestamps (WhisperBox deadlines), APPENDED — never insert above: Binder txn ids are positional.
+    // The client asks for features (bit 1 = deliver via ILogosDeliveryCallback.onMessageMeta with the
+    // network timestamp + source); the service answers with the features it will use. An older Loam
+    // without this method replies empty, which reads as 0: the client stays on onMessage.
+    int setClientFeatures(String appId, int features);
 }

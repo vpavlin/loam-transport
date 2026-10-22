@@ -10,7 +10,7 @@ import { Receivers } from "./receivers";
 import { fromByteArray, toByteArray } from "base64-js";
 import { sha256 as sha256hash } from "@noble/hashes/sha2.js";
 import { utf8Bytes as utf8, utf8Decode as fromUtf8 } from "./utf8";
-import { SharedDeliveryNode, Tenant } from "./broker";
+import { SharedDeliveryNode, Tenant, rxMeta, type RxMeta } from "./broker";
 import { RealNode } from "./real-node";
 import { ServiceNode } from "./service-node";
 import { BleMeshBearer, makeFrame } from "./bearer";
@@ -78,7 +78,10 @@ const STORE_PAGE = 100;          // KYM STORE_PAGE
 const STORE_TIMEOUT_MS = 20000;  // KYM STORE_TIMEOUT_MS
 const STORE_MAX_PAGES = 25;      // KYM STORE_MAX_PAGES (25*100 = 2500 events/topic)
 
-export type OnReceive = (topic: string, candidates: Uint8Array[]) => boolean; // true iff app opened one
+// true iff the app opened one. meta (optional, newer transports only): the network timestamp in ns
+// (0 = none: BLE, or a shared Loam service too old to pass it), its source and bearer — see RxMeta.
+// Duplicates aren't collapsed here: the app dedups by event and should keep the EARLIEST meta.ts.
+export type OnReceive = (topic: string, candidates: Uint8Array[], meta?: RxMeta) => boolean;
 export type OnStatus = (s: string) => void;
 
 // Edge drops relay + discv5 (it neither serves the shard nor discovers peers); it publishes
@@ -146,7 +149,7 @@ function wire(b: RealNode | ServiceNode) {
   shared = new SharedDeliveryNode(backend);
   // the app's single tenant opens (decrypts) via onReceive and reports back.
   tenant = shared.registerTenant("app").onMessage(
-    (topic: string, cands: Uint8Array[]) => receivers.dispatch(topic, cands),
+    (topic: string, cands: Uint8Array[], meta: RxMeta) => receivers.dispatch(topic, cands, meta),
   );
 }
 function ensure() {
@@ -161,6 +164,15 @@ export function refreshDebug(): Promise<void> {
   const b = backend as any;
   return b && typeof b.refreshPeerInfo === "function" ? b.refreshPeerInfo() : Promise.resolve();
 }
+
+// Feature flags apps gate on (mirrors loam_core capabilities()). networkTs: onReceive's meta.ts is
+// the network message timestamp when the backend has one — on the shared Loam service only if that
+// service is new enough (ServiceNode.metaSupported(); otherwise meta.ts is 0).
+export function capabilities(): { networkTs: boolean; serviceMeta: boolean | null } {
+  const b = backend as any;
+  return { networkTs: true, serviceMeta: b instanceof ServiceNode ? b.metaSupported() : null };
+}
+export { type RxMeta } from "./broker";
 
 export function usingServiceBackend(): boolean { return backend instanceof ServiceNode; }
 export function serviceNodeDown(): boolean { return backend instanceof ServiceNode ? backend.isNodeDown() : false; }
@@ -228,7 +240,7 @@ export function getCtx(): string { return backend ? backend.getCtx() : ""; }
 // (`dropped > 0` means the cache overflowed, so the client should still reconcile).
 export function registerClient(
   appId: string,
-  onMessage: (topic: string, candidates: Uint8Array[]) => boolean,
+  onMessage: (topic: string, candidates: Uint8Array[], meta?: RxMeta) => boolean,
   opts?: { cacheLimit?: number },
 ): Tenant {
   ensure();
@@ -456,7 +468,7 @@ async function armMeshNow(): Promise<void> {
   const m = new BleMeshBearer(factory(), meshOpts);
   m.onReceive((f) => {
     counters.rxRaw++; counters.bleRx++;
-    const opened = shared ? shared._route(f.topic, [f.payload]) : false;
+    const opened = shared ? shared._route(f.topic, [f.payload], rxMeta(0, "", "ble")) : false;   // BLE: no network ts
     if (opened) { counters.rxNew++; counters.bleRxDelivered++; noteTopic(meshRxDeliv, f.topic); }
     else { counters.rxDup++; counters.bleRxDropped++; noteTopic(meshRxDrop, f.topic); }
   });
@@ -483,7 +495,7 @@ export async function join(topics: string[]): Promise<void> {
 
 export async function stop(): Promise<void> { running = false; if (backend) await backend.stop(); }
 
-export function storeSync(onCandidates: (topic: string, candidates: Uint8Array[]) => boolean) {
+export function storeSync(onCandidates: (topic: string, candidates: Uint8Array[], meta?: RxMeta) => boolean) {
   ensure(); return backend!.storeSync(onCandidates);
 }
 

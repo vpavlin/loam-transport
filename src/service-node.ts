@@ -5,6 +5,7 @@
 // Requires the host app to provide a `LogosDeliveryClient` native module (binds the AIDL
 // service, forwards calls, emits received messages). If that module is absent (service not
 // integrated), ServiceNode.available() is false and the transport falls back to RealNode.
+import { rxMeta, type RxMeta } from "./broker";
 import { NativeModules, NativeEventEmitter } from "react-native";
 import { fromByteArray, toByteArray } from "base64-js";
 import type { UnderlyingNode } from "./broker";
@@ -20,7 +21,8 @@ export class ServiceNode implements UnderlyingNode {
   // field of the same name shadowed it, so serviceDiag() threw "diag is not a function".
   private txDiag: any;
   private ready = false;
-  private route: (topic: string, payload: any) => boolean = () => false;
+  private route: (topic: string, payload: any, meta?: RxMeta) => boolean = () => false;
+  private features = 0;   // what the Loam service agreed to (setClientFeatures): 1 = network-timestamp meta
   private listenerAttached = false;
   private reconnectTimer: any = null;
   nodeDown = false;   // bound, but the service app's node/JS isn't running (no metrics)
@@ -38,13 +40,16 @@ export class ServiceNode implements UnderlyingNode {
   isReady(): boolean { return this.ready; }
   getCtx(): string { return this.ready ? "service" : ""; }
 
-  onReceive(route: (topic: string, payload: any) => boolean): void {
+  /** True once the bound Loam service delivers network timestamps (meta.ts); false = an older Loam. */
+  metaSupported(): boolean { return (this.features & 1) !== 0; }
+
+  onReceive(route: (topic: string, payload: any, meta?: RxMeta) => boolean): void {
     this.route = route;
     if (this.listenerAttached || !emitter) return;
     this.listenerAttached = true;
     // The service forwards each message as a JSON array of base64 payload candidates
     // (it stays a blind pipe; we open with our own key upstream, exactly like RealNode).
-    emitter.addListener("logosDeliveryMessage", (m: { topic?: string; candidatesJson?: string }) => {
+    emitter.addListener("logosDeliveryMessage", (m: { topic?: string; candidatesJson?: string; metaJson?: string }) => {
       try {
         if (!this.ready) return;
         const topic = m.topic || "";
@@ -52,13 +57,18 @@ export class ServiceNode implements UnderlyingNode {
         const arr: string[] = m.candidatesJson ? JSON.parse(m.candidatesJson) : [];
         // withUnwrappedSegments: the service may predate segment-compat, so unwrap here too.
         const cands = withUnwrappedSegments(arr.map((b64) => toByteArray(b64)));
-        this.route(topic, cands);
+        // metaJson only comes from a Loam that agreed to send it; an older one gives no meta (ts 0).
+        let meta: RxMeta | undefined;
+        if (m.metaJson) { try { const j = JSON.parse(m.metaJson); meta = rxMeta(j.ts, j.source, j.bearer || "delivery"); } catch { /* */ } }
+        this.route(topic, cands, meta);
       } catch { /* never throw in the listener */ }
     });
     // Reconnect lifecycle: when the service is updated/killed and comes back, re-subscribe
     // our topics (the owner's grant persists, so no re-prompt). While it's gone, keep rebinding.
     emitter.addListener("logosDeliveryConnected", () => {
       for (const t of this.joinedTopics) { try { Client.subscribe(t); } catch { /* */ } }
+      // a restarted/updated Loam re-decides what it serves (native re-ran setClientFeatures)
+      try { if (typeof Client.features === "function") Promise.resolve(Client.features()).then((f: any) => { this.features = Number(f) || 0; }, () => {}); } catch { /* */ }
       this.ready = true; this.nodeDown = false;
       if (this.reconnectTimer) { clearInterval(this.reconnectTimer); this.reconnectTimer = null; }
     });
@@ -84,6 +94,7 @@ export class ServiceNode implements UnderlyingNode {
     const ok = await Client.connect();          // bind the AIDL service
     if (!ok) throw new Error("could not bind Logos Delivery service");
     await Client.register(this.appId);          // triggers the "Allow App X?" consent
+    try { this.features = typeof Client.features === "function" ? Number(await Client.features()) || 0 : 0; } catch { this.features = 0; }
     step("Awaiting approval / syncing…");
     for (const t of initialTopics) { await Client.subscribe(t); this.joinedTopics.add(t); }
     this.ready = true;

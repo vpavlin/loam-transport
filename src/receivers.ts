@@ -2,16 +2,18 @@
 // (Freequencies runs Scala's sync and Kith's sync), and each calls start() with its own onReceive.
 // Each receiver opens only the topics it owns and returns false for the rest, so an incoming
 // message is offered to every receiver until one opens it.
-export type Receiver = (topic: string, candidates: Uint8Array[]) => boolean;
+import type { RxMeta } from "./broker";
+// meta (optional third argument, added later — older receivers simply ignore it): see RxMeta.
+export type Receiver = (topic: string, candidates: Uint8Array[], meta?: RxMeta) => boolean;
 
 export class Receivers {
   private list: Receiver[] = [];
   // Idempotent per function: an engine that calls start() again with the same handler isn't added twice.
   add(r: Receiver): void { if (!this.list.includes(r)) this.list.push(r); }
   get size(): number { return this.list.length; }
-  dispatch(topic: string, candidates: Uint8Array[]): boolean {
+  dispatch(topic: string, candidates: Uint8Array[], meta?: RxMeta): boolean {
     for (const r of this.list) {
-      try { if (r(topic, candidates)) return true; } catch { /* one engine's bug must not starve the others */ }
+      try { if (r(topic, candidates, meta)) return true; } catch { /* one engine's bug must not starve the others */ }
     }
     return false;
   }

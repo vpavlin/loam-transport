@@ -9,17 +9,30 @@
 // tenant callback returns whether the app "opened" (decrypted) the message, which the
 // underlying node uses for its rx counters.
 
+// Where and when a message was received. `ts` is the NETWORK message timestamp in NANOSECONDS (the
+// WakuMessage timestamp its publisher set; RLN binds it into the proof and relays reject one more than
+// ~20 s off their clock), 0 when the bearer has none (BLE mesh, or a backend that doesn't report it),
+// so 0 means unverified. A JS number holds it to ~256 ns, plenty for deadlines; tsMs is the same in ms.
+// `source` is delivery's "live" | "history" (store), "" when unknown.
+export interface RxMeta { ts: number; tsMs: number; source: string; bearer: string }
+export const NO_META: RxMeta = Object.freeze({ ts: 0, tsMs: 0, source: "", bearer: "" }) as RxMeta;
+export function rxMeta(tsNs: unknown, source: unknown, bearer: string): RxMeta {
+  const ts = typeof tsNs === "number" && isFinite(tsNs) && tsNs > 0 ? tsNs
+    : typeof tsNs === "string" && /^\d+$/.test(tsNs) ? Number(tsNs) : 0;
+  return { ts, tsMs: ts ? Math.floor(ts / 1e6) : 0, source: typeof source === "string" ? source : "", bearer };
+}
+
 export interface UnderlyingNode {
   // Bring the one node up and join the initial topics (impl owns the exact ordering).
   start(initialTopics: string[], onStatus?: (s: string) => void): Promise<void>;
   subscribe(topic: string): Promise<void>;
   unsubscribe(topic: string): Promise<void>;
   // Register the single global receive stream; the broker demuxes it by content topic.
-  onReceive(route: (topic: string, payload: any) => boolean): void;
+  onReceive(route: (topic: string, payload: any, meta?: RxMeta) => boolean): void;
   isReady(): boolean;
   // Optional cold-start history pull (waku_store_query) over the joined topics. Present on the real
   // node, absent on mocks/stubs. onCandidates(topic, candidates) is invoked per stored message.
-  storeSync?(onCandidates: (topic: string, candidates: Uint8Array[]) => boolean, topics?: string[]): Promise<{ msgs: number; events: number; detail: string }>;
+  storeSync?(onCandidates: (topic: string, candidates: Uint8Array[], meta?: RxMeta) => boolean, topics?: string[]): Promise<{ msgs: number; events: number; detail: string }>;
 }
 
 export class SharedDeliveryNode {
@@ -32,7 +45,7 @@ export class SharedDeliveryNode {
   constructor(node: UnderlyingNode) {
     this.node = node;
     // ONE global receive handler for the whole device; demux by content topic.
-    this.node.onReceive((topic, payload) => this._route(topic, payload));
+    this.node.onReceive((topic, payload, meta) => this._route(topic, payload, meta));
   }
 
   // `cacheLimit > 0` opts this tenant into offline caching (ADR 0011): when its app
@@ -95,17 +108,17 @@ export class SharedDeliveryNode {
     if (!this.node.storeSync) return { msgs: 0, events: 0, detail: "node has no store query" };
     // Only THIS tenant's topics are queried (a pull used to walk every app's topics). Results are routed
     // to every owner like a live receive, so a pull coalesced with another app's request serves both.
-    return this.node.storeSync((topic, candidates) => this._route(topic, candidates as any), [...t.topics]);
+    return this.node.storeSync((topic, candidates, meta) => this._route(topic, candidates as any, meta), [...t.topics]);
   }
 
   // Returns true iff some owning tenant opened (decrypted) the message.
-  _route(topic: string, payload: any): boolean {
+  _route(topic: string, payload: any, meta: RxMeta = NO_META): boolean {
     const set = this.owners.get(topic);
     if (!set || set.size === 0) return false; // foreign / unowned topic -> dropped
     let opened = false;
     for (const tenantId of set) {
       const t = this.tenants.get(tenantId);
-      if (t && t._deliver(topic, payload)) opened = true;
+      if (t && t._deliver(topic, payload, meta)) opened = true;
     }
     return opened;
   }
@@ -115,13 +128,13 @@ export class Tenant {
   broker: SharedDeliveryNode;
   id: string;
   topics = new Set<string>();
-  cb: ((topic: string, payload: any) => boolean) | null = null;
+  cb: ((topic: string, payload: any, meta: RxMeta) => boolean) | null = null;
 
   /** Offline cache (ADR 0011). 0 = disabled. When > 0 and the app is detached, the
    *  broker keeps the subscription and buffers incoming sealed payloads here (a ring
    *  of at most `cacheLimit`), delivered in order on reattach. */
   cacheLimit = 0;
-  private buffer: { topic: string; payload: any }[] = [];
+  private buffer: { topic: string; payload: any; meta: RxMeta }[] = [];
   /** Messages evicted because the ring was full while detached. A non-zero value on
    *  reattach means the cache could NOT cover the gap → the app must reconcile. */
   private dropped = 0;
@@ -131,7 +144,7 @@ export class Tenant {
 
   constructor(broker: SharedDeliveryNode, id: string) { this.broker = broker; this.id = id; }
 
-  onMessage(cb: (topic: string, payload: any) => boolean): this { this.cb = cb; return this; }
+  onMessage(cb: (topic: string, payload: any, meta: RxMeta) => boolean): this { this.cb = cb; return this; }
 
   async subscribe(topic: string): Promise<void> {
     this.topics.add(topic);
@@ -153,13 +166,13 @@ export class Tenant {
   // how many were delivered vs dropped. dropped > 0 ⇒ the cache overflowed while away,
   // so the app should still run catch-up; dropped === 0 ⇒ the cache was complete and
   // catch-up can be skipped (the "avoid replay" win).
-  reattach(cb: (topic: string, payload: any) => boolean): { delivered: number; dropped: number } {
+  reattach(cb: (topic: string, payload: any, meta: RxMeta) => boolean): { delivered: number; dropped: number } {
     this.cb = cb;
     const drained = this.buffer;
     const dropped = this.dropped;
     this.buffer = [];
     this.dropped = 0;
-    for (const m of drained) cb(m.topic, m.payload);
+    for (const m of drained) cb(m.topic, m.payload, m.meta);
     this.lastReplay = { delivered: drained.length, dropped };
     return this.lastReplay;
   }
@@ -175,10 +188,10 @@ export class Tenant {
     this.cb = null;
   }
 
-  _deliver(topic: string, payload: any): boolean {
-    if (this.cb) return this.cb(topic, payload);   // live — deliver to the app now
+  _deliver(topic: string, payload: any, meta: RxMeta = NO_META): boolean {
+    if (this.cb) return this.cb(topic, payload, meta);   // live — deliver to the app now
     if (this.cacheLimit > 0) {                       // detached + opted-in → cache it
-      this.buffer.push({ topic, payload });
+      this.buffer.push({ topic, payload, meta });
       while (this.buffer.length > this.cacheLimit) { this.buffer.shift(); this.dropped++; }
     }
     return false;                                    // not opened by the app right now

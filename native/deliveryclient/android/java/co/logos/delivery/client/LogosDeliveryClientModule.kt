@@ -27,11 +27,19 @@ class LogosDeliveryClientModule(private val ctx: ReactApplicationContext) : Reac
   private var pending: Promise? = null
 
   private val callback = object : ILogosDeliveryCallback.Stub() {
-    override fun onMessage(topic: String, candidatesJson: String) {
-      val p = Arguments.createMap().apply { putString("topic", topic); putString("candidatesJson", candidatesJson) }
-      try { ctx.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java).emit("logosDeliveryMessage", p) } catch (_: Throwable) {}
-    }
+    override fun onMessage(topic: String, candidatesJson: String) = deliver(topic, candidatesJson, null)
+    override fun onMessageMeta(topic: String, candidatesJson: String, metaJson: String) = deliver(topic, candidatesJson, metaJson)
   }
+  private fun deliver(topic: String, candidatesJson: String, metaJson: String?) {
+    val p = Arguments.createMap().apply {
+      putString("topic", topic); putString("candidatesJson", candidatesJson)
+      if (metaJson != null) putString("metaJson", metaJson)
+    }
+    try { ctx.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java).emit("logosDeliveryMessage", p) } catch (_: Throwable) {}
+  }
+  // Features the bound Loam service agreed to (setClientFeatures); 0 = an older Loam.
+  @Volatile private var serviceFeatures = 0
+  private val FEATURE_META = 1
   private fun emit(event: String) {
     try { ctx.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java).emit(event, null) } catch (_: Throwable) {}
   }
@@ -45,7 +53,11 @@ class LogosDeliveryClientModule(private val ctx: ReactApplicationContext) : Reac
       pending?.resolve(true); pending = null
       // On a RE-connect (service updated/restarted) re-register so the service re-knows us;
       // the owner's grant persists, so no re-prompt. The JS side re-subscribes on "connected".
-      if (appId != "app") { try { svc?.registerClient(appId, callback) } catch (_: Throwable) {} }
+      if (appId != "app") {
+        try { svc?.registerClient(appId, callback) } catch (_: Throwable) {}
+        // the (possibly updated) service decides afresh which features it serves us
+        serviceFeatures = try { svc?.setClientFeatures(appId, FEATURE_META) ?: 0 } catch (_: Throwable) { 0 }
+      }
       emit("logosDeliveryConnected")
     }
     override fun onServiceDisconnected(name: ComponentName?) { svc = null; emit("logosDeliveryDisconnected") }
@@ -79,7 +91,13 @@ class LogosDeliveryClientModule(private val ctx: ReactApplicationContext) : Reac
       i?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK); i?.let { ctx.startActivity(it) }
     } catch (_: Throwable) {}
   }
-  @ReactMethod fun register(id: String) { appId = id; try { svc?.registerClient(id, callback) } catch (_: Throwable) {} }
+  @ReactMethod fun register(id: String) {
+    appId = id
+    try { svc?.registerClient(id, callback) } catch (_: Throwable) {}
+    serviceFeatures = try { svc?.setClientFeatures(id, FEATURE_META) ?: 0 } catch (_: Throwable) { 0 }
+  }
+  // Which features the Loam service agreed to: 1 = onMessageMeta (network timestamps). 0 = older Loam.
+  @ReactMethod fun features(promise: Promise) { promise.resolve(serviceFeatures) }
   @ReactMethod fun subscribe(topic: String) { try { svc?.subscribe(appId, topic) } catch (_: Throwable) {} }
   @ReactMethod fun send(topic: String, sealedB64: String) { try { svc?.send(appId, topic, Base64.decode(sealedB64, Base64.NO_WRAP)) } catch (_: Throwable) {} }
   // Fire-and-forget cold-start history pull — the service runs waku_store_query and pushes each
