@@ -99,8 +99,8 @@ storage.info()                              -> { running, online, peers, cacheBy
   `timeout`, as above), `cancelled`. Progress is a poll of `status`, not a stream of events: the app
   may not be alive to receive events, and polling once a second is cheap over AIDL.
 - **Cancel** calls `storage_download_cancel` from a second thread (the storage thread is the one blocked
-  in the download), then drops the CID's blocks. Any app that joined the job can cancel it. Jobs are
-  per CID, so cancelling for one app cancels it for all; acceptable while one app asks for any given CID.
+  in the download), then drops the CID's blocks. Jobs are per CID and shared, so an app's cancel only
+  withdraws its own interest; the download stops when no app wants it any more (see the audit amendment below).
 - **Bootstrap peers** come from the caller: a Backpack repo link or a Scala invite carries the node that
   holds the CID, and Loam dials it directly before fetching (NAT-ed phones can't rely on discovery).
 - **Jobs run one at a time** on Loam's storage thread (libstorage's C calls block). The queue is FIFO.
