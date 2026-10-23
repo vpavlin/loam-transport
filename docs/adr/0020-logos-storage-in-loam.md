@@ -1,6 +1,6 @@
 # 20. Logos Storage in Loam (one fetch client per phone)
 
-- **Status:** proposed
+- **Status:** accepted, amended 2026-10-23 (background jobs, cancel, cache; see the amendment at the end)
 - **Date:** 2026-09-29
 - **Builds on:** [0010](0010-shared-node-broker-and-servicenode.md) (shared node + ServiceNode),
   [0007](0007-reconnect-watchdog.md) (online detection)
@@ -70,3 +70,78 @@ storage.cached(cid)                        -> boolean
 - **Small cached files phone-to-phone over the BLE mesh.** The cache is content-addressed and BLE
   fragments up to ~130 KB (0019), so a snapshot could reach an offline phone from a neighbour that has it.
 - Prefetch hints, such as "this calendar's latest snapshot", so Loam can warm the cache while online.
+
+## Amendment 2026-10-23: background jobs, cancel, a cache that survives
+
+Backpack (an app store on Logos Storage: github.com/vpavlin/backpack) is the second user after Scala,
+and it changed two requirements. Its APKs are 1-70 MB, so a fetch takes minutes. And when the user
+leaves the app, Android cuts its network, so the download dies. Loam's foreground service keeps the
+network, so a fetch started there should outlive the app that asked for it.
+
+**Loam knows CIDs, not file types.** Nothing in Loam understands APKs, snapshots or attachments. An app
+asks for a CID. Loam brings it into its local store and cache, and hands the bytes back when the app
+asks again. Checking what the bytes are (Backpack: SHA-256 and APK signer) stays in the app.
+
+### The API (replaces the sketch above)
+
+```
+storage.fetch(cid, { bootstrap?: Peer[] })  -> { state }          start or join a background job; returns at once
+storage.status(cid)                         -> { state, bytes, total, error? }
+storage.cancel(cid)                         -> { state }
+storage.open(cid)                           -> ParcelFileDescriptor (read-only) | error   only when state = done
+storage.info()                              -> { running, online, peers, cacheBytes, cacheCap, jobs }
+```
+
+- **A fetch is a job, keyed by CID, not by caller.** Two apps asking for the same CID share one job. The
+  job runs in Loam's service: the requesting app may close, and Android may kill it. When it comes back,
+  `status(cid)` says how far it got; `open(cid)` gives the bytes without touching the network.
+- **States:** `queued`, `fetching`, `done`, `failed` (with `offline`, `no-peers`, `not-found` or
+  `timeout`, as above), `cancelled`. Progress is a poll of `status`, not a stream of events: the app
+  may not be alive to receive events, and polling once a second is cheap over AIDL.
+- **Cancel** calls `storage_download_cancel` from a second thread (the storage thread is the one blocked
+  in the download), then drops the CID's blocks. Any app that joined the job can cancel it. Jobs are
+  per CID, so cancelling for one app cancels it for all; acceptable while one app asks for any given CID.
+- **Bootstrap peers** come from the caller: a Backpack repo link or a Scala invite carries the node that
+  holds the CID, and Loam dials it directly before fetching (NAT-ed phones can't rely on discovery).
+- **Jobs run one at a time** on Loam's storage thread (libstorage's C calls block). The queue is FIFO.
+  A small CID queued behind a 70 MB one waits; acceptable for now, revisit with a second lane.
+
+### The cache
+
+- **Completed CIDs are plain files** under Loam's files dir, named by CID, written by
+  `storage_download_stream`. `open` hands out a read-only descriptor to that file.
+- **libstorage's own data dir is scratch.** It is wiped when the node starts. Backpack found that a data
+  dir left by a download that was killed makes the next download hang; reusing it across process deaths
+  is not safe yet. The finished files are the cache, not the block store.
+- **Cap and eviction:** a size cap (default 1 GB, set in Loam), LRU by last `open`. A file is never
+  evicted while its job is running or within an hour of finishing and not yet opened. That gives an app
+  that started a fetch time to come back for it.
+- **Per-app accounting** for the UI ("Backpack: 340 MB"), not enforcement. Every app that fetched a CID
+  counts it.
+
+### What Backpack learned that applies here
+
+- **Library:** logos-storage-nim PR #1540 (d82d0d39 + a2a353e). Older builds stall on multi-block
+  downloads (the "manifest arrives, blocks never do" swarm bug), and Scala's prebuilt arm64 build
+  crashed inside fetch. See backpack ADR 0005.
+- **JNI:** a timed-out call must mark its response "abandoned", so the late callback doesn't write
+  freed memory. `storage_fetch` returns once the manifest is in; most blocks arrive during
+  `download_stream`, so progress is measured from the output file and the block store together.
+- **Speed is round-trip bound:** publishers should upload with 512 KiB blocks (backpack ADR 0006).
+  Nothing in Loam depends on it.
+- **The node starts once per process and is never restarted in-process** (a second `start` aborts, and
+  an in-process restart hung the next download). Idle-out therefore means stopping the node and
+  letting the process keep it stopped until the next fetch, not a restart loop.
+
+### Rollout (progressive)
+
+1. **Loam:** the storage service (libstorage + JNI from Backpack, PR #1540 build), the job queue, the
+   cache, and the AIDL methods, **appended after the existing ones**. Approval: the existing per-app
+   grant covers Storage too (same consent: "this app may use Loam's network").
+2. **loam-transport:** a `storage` client module (`fetch/status/cancel/open/info`) over the existing
+   binding, returning `null` when the Loam service has no Storage.
+3. **Backpack:** uses Loam's Storage when present, keeps its embedded node as the fallback. Downloads
+   continue with the app closed; reopening shows the job's progress and picks up the file.
+4. **Scala**, then other apps, move their snapshot and attachment fetches over, and drop their copies
+   of libstorage once Loam with Storage is common.
+
