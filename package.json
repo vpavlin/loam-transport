@@ -3,7 +3,15 @@
   "version": "0.8.0",
   "description": "Shared crypto-agnostic sync transport over liblogosdelivery + SDS Reliable Channels. Mobile (React Native/Expo, arm64 Android) + Basecamp (C++) sides, wire-compatible. Proven in KYM + qaku.",
   "main": "src/logos-transport.ts",
-  "files": ["src", "native", "plugins", "basecamp", "docs", "examples", "README.md"],
+  "files": [
+    "src",
+    "native",
+    "plugins",
+    "basecamp",
+    "docs",
+    "examples",
+    "README.md"
+  ],
   "peerDependencies": {
     "react-native": "*",
     "base64-js": "*",
@@ -13,10 +21,32 @@
     "expo-file-system": "*"
   },
   "peerDependenciesMeta": {
-    "@noble/ciphers": { "optional": true },
-    "expo-crypto": { "optional": true },
-    "expo-file-system": { "optional": true }
+    "@noble/ciphers": {
+      "optional": true
+    },
+    "expo-crypto": {
+      "optional": true
+    },
+    "expo-file-system": {
+      "optional": true
+    }
   },
-  "keywords": ["logos", "waku", "sds", "reliable-channels", "basecamp", "sync", "crdt", "expo"],
-  "license": "MIT"
+  "keywords": [
+    "logos",
+    "waku",
+    "sds",
+    "reliable-channels",
+    "basecamp",
+    "sync",
+    "crdt",
+    "expo"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@noble/hashes": "^1.8.0",
+    "base64-js": "^1.5.1"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test test/*.test.ts"
+  }
 }

@@ -1,5 +1,5 @@
 import assert from "node:assert";
-import { SharedDeliveryNode } from "/home/vpavlin/logos-transport/src/broker.ts";
+import { SharedDeliveryNode } from "../src/broker.ts";
 
 // mock node: records subscriptions; lets the test push messages into the router.
 let router: (t: string, p: any) => boolean = () => false;

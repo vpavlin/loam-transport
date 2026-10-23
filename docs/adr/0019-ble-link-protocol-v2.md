@@ -43,8 +43,9 @@ Every GATT write or notify carries exactly one frame. The first byte is its type
 | `Q` | 0x51 | wire node id (16 B) | "this link is me — **who are you?**" (the receiver records the id, then answers with `A`) |
 | `F` | 0x46 | `msgId(2 BE) \| idx(1) \| count(1) \| chunk` | one fragment of a portable frame (0012) |
 
-- **Wire node id** = `base64url(sha256(deviceId)[0..12])`, which is always 16 characters. Peers treat it as an
-  opaque key. It keeps every announce within one minimum-MTU write (1 + 16 ≤ 20).
+- **Wire node id** = 16 characters of base64url over 12 bytes. **Superseded by ADR 0022:** the 12 bytes are
+  random, fresh on every start and every rotation (`freshWireId()`), not `sha256(deviceId)`. Peers treat it as an
+  opaque key. A link keeps the id it first announced; a different id on the same link is ignored (2026-10-23). It keeps every announce within one minimum-MTU write (1 + 16 ≤ 20).
 - **Fragment size** = `min(MTU − 3, 512) − 5`. The 512 is Android's maximum attribute length, and the 5 is the
   type byte plus the fragment header. There is no floor.
 - **Max 255 fragments** per message, because `idx` and `count` are one byte each. A larger message is refused

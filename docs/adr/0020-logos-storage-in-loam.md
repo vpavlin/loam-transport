@@ -45,7 +45,7 @@ storage.cached(cid)                        -> boolean
 - **A shared, content-addressed cache.** Anything any app fetched is served locally to every app. A CID
   is self-verifying, so sharing needs no trust between apps. Eviction is LRU with a size cap.
 - **The node runs only while needed.** It starts on the first `fetch` (or at boot if a client asks) and
-  idles out after a quiet period. Online detection reuses `LoamMesh.online()` (0007 amendment).
+  stays up until Loam's process ends (see the 2026-10-23 amendment: idle-out is not implemented). Online detection reuses `LoamMesh.online()` (0007 amendment).
 - **Migration.** Scala keeps its embedded client as a fallback while Loam is absent or older than the
   version with Storage, then drops it (and 22 MB).
 
@@ -145,3 +145,24 @@ storage.info()                              -> { running, online, peers, cacheBy
 4. **Scala**, then other apps, move their snapshot and attachment fetches over, and drop their copies
    of libstorage once Loam with Storage is common.
 
+
+## Amendment 2026-10-23 — after the Loam audit (L-3, L-5, L-6, L-7, L-10, L-12, L-13)
+
+- **Scoped to the caller.** The cache is shared, but by capability: an app reaches a file only after it
+  asked for that CID (`storageFetch`). `status`, `cancel` and `open` answer only for CIDs the calling
+  app (`package|cert`) fetched; to any other app the CID is `none`. Owners of finished files are kept
+  beside them (`<cid>.owners`), so they survive restarts. `cancel` drops only the caller's interest;
+  the download stops when no app wants it. `info` gives an app the cache totals and its own jobs, never
+  other apps' names. Loam's own UI sees everything.
+- **Every argument is a CID.** `status` and `cancel` refuse anything that is not one, like `fetch` and
+  `open` did.
+- **Hard limits.** The 1 GiB cap is hard: eviction goes oldest-first, takes files under an hour old
+  only when nothing older is left, never a running job's file, and a download that still doesn't fit
+  fails with `cache full`. At most 32 queued or fetching jobs, 8 per app; finished jobs are pruned.
+- **No app picks the shared node's bootstrap.** The node always joins `logos.test`. Peers an app passes
+  are dialled for that app's job only (`storageConnect`), after dropping loopback, link-local and
+  unspecified addresses in any spelling (the parsed address is judged, IPv4-mapped IPv6 included).
+- **Off means off.** With Storage turned off, no new jobs start, running ones are cancelled, and
+  `open` refuses cached files too.
+- **Idle-out is not implemented.** The node is started on first use and runs until Loam's process
+  ends: libstorage cannot restart in-process. The line above that said it idles out was wrong.

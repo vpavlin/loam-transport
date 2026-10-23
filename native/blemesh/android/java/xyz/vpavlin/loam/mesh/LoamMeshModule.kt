@@ -156,6 +156,18 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
   private val addrToNode = ConcurrentHashMap<String, String>()               // BLE address -> peer node id
   private val nodeToAddrs = ConcurrentHashMap<String, MutableSet<String>>()  // node id -> its link addresses
   private val reasmTime = ConcurrentHashMap<String, Long>()                  // reassembly key -> first-seen ms
+  // Control-plane bounds (audit L-8). Everything below runs before any app's AEAD check, for any
+  // device in range, so every table is capped and every peer rate-limited.
+  private val MAX_ASSEMBLIES_PER_LINK = 128
+  private val MAX_ASSEMBLIES = 1024
+  private val MAX_REASM_BYTES = 8L shl 20
+  private val reasmBytes = java.util.concurrent.atomic.AtomicLong()
+  private val MAX_NODES = 64                                                 // distinct announced ids we track
+  private val FRAG_PER_SEC = 200                                             // per link; BLE does far less
+  private val fragWindow = ConcurrentHashMap<String, LongArray>()            // addr -> [windowStart, count]
+  private val lastAnnounceAnswer = ConcurrentHashMap<String, Long>()
+  private val ANNOUNCE_ANSWER_MS = 1000L
+  private val WIRE_ID_RE = Regex("^[A-Za-z0-9_-]{1,16}$")
   // Connection setup must be SERIALIZED (BLE allows one GATT op per link): MTU -> discover -> CCCD
   // write -> announce, each step driven by the previous op's completion callback. Firing them
   // back-to-back was the root bug — the announce collided with the in-flight CCCD write, got
@@ -173,6 +185,7 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
   // that also clears zombie links whose setup silently failed.
   private val announceRetry = object : Runnable {
     override fun run() {
+      try { sweepReasm() } catch (_: Exception) {}
       if (wireId.isNotEmpty()) try {
         val now = System.currentTimeMillis()
         for ((addr, since) in inFlightSince) {
@@ -240,7 +253,7 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
     clientGatts.clear(); serverDevices.clear(); mtu.clear(); connecting.clear()
     discovered.clear(); announceTries.clear()
     inFlight.clear(); inFlightSince.clear(); setupDone.clear(); sendQ.clear(); addrToNode.clear(); nodeToAddrs.clear()
-    reasm.clear(); reasmCount.clear(); reasmTime.clear()
+    reasm.clear(); reasmCount.clear(); reasmTime.clear(); reasmBytes.set(0); fragWindow.clear(); lastAnnounceAnswer.clear()
   }
 
   // Drop a link we can't use (anonymous, or services missing) so the scanner re-dials it cleanly.
@@ -371,7 +384,12 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
     val idb = wireId.toByteArray(Charsets.UTF_8)
     val frame = ByteArray(1 + idb.size); frame[0] = (if (askBack) T_ANNOUNCE_REQ else T_ANNOUNCE).toByte(); System.arraycopy(idb, 0, frame, 1, idb.size)
     val q = sendQ.getOrPut(addr) { java.util.ArrayDeque() }
-    synchronized(q) { q.addFirst(frame) }
+    synchronized(q) {
+      // one pending announce per link, and none past the backlog cap (audit L-8)
+      val head = q.peekFirst()
+      if (q.size >= MAX_QUEUE_FRAMES || (head != null && head.isNotEmpty() && ((head[0].toInt() and 0xff) == T_ANNOUNCE || (head[0].toInt() and 0xff) == T_ANNOUNCE_REQ))) return
+      q.addFirst(frame)
+    }
     Log.d(TAG, "announce -> $addr (wire ${wireId.take(6)}, ${frame.size}B)")
     pump(addr)
   }
@@ -651,11 +669,22 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
     if (frame.isEmpty()) return
     when (frame[0].toInt() and 0xff) {
       T_ANNOUNCE -> { onAnnounce(addr, frame); return }
-      T_ANNOUNCE_REQ -> { onAnnounce(addr, frame); sendAnnounce(addr); return }   // they don't know us yet: answer
+      T_ANNOUNCE_REQ -> {   // they don't know us yet: answer, at most once a second per link
+        onAnnounce(addr, frame)
+        val now = System.currentTimeMillis()
+        if (now - (lastAnnounceAnswer[addr] ?: 0L) >= ANNOUNCE_ANSWER_MS) { lastAnnounceAnswer[addr] = now; sendAnnounce(addr) }
+        return
+      }
       T_FRAG -> { /* fall through */ }
       else -> return
     }
     if (frame.size < 5) return
+    val nowMs = System.currentTimeMillis()
+    val w = fragWindow.getOrPut(addr) { longArrayOf(nowMs, 0) }
+    synchronized(w) {
+      if (nowMs - w[0] >= 1000) { w[0] = nowMs; w[1] = 0 }
+      if (++w[1] > FRAG_PER_SEC) { stLastErr = "rate limit"; return }
+    }
     stFragRecv++
     val id = ((frame[1].toInt() and 0xff) shl 8) or (frame[2].toInt() and 0xff)
     val idx = frame[3].toInt() and 0xff
@@ -663,23 +692,39 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
     stLastFrag = "$idx/$count"
     val chunk = frame.copyOfRange(5, frame.size)
     val node = addrToNode[addr] ?: addr   // deliver under the stable node id if we know it
-    if (count <= 1) { deliver(node, chunk); return }
+    if (count == 0 || idx >= count) return            // L-14: a 0-count frame is not a message
+    if (count == 1) { deliver(node, chunk); return }
     val key = "$addr/$id"
-    val parts = reasm.getOrPut(key) { ConcurrentHashMap() }
-    parts[idx] = chunk; reasmCount[key] = count; reasmTime[key] = System.currentTimeMillis()
-    if (parts.size >= count) {
+    var parts = reasm[key]
+    if (parts == null) {
+      if (reasm.size >= MAX_ASSEMBLIES || reasm.keys.count { it.startsWith("$addr/") } >= MAX_ASSEMBLIES_PER_LINK) { stLastErr = "reasm full"; return }
+      parts = reasm.getOrPut(key) { ConcurrentHashMap() }
+      reasmCount[key] = count; reasmTime[key] = nowMs
+    }
+    if (reasmCount[key] != count) return               // a fragment that disagrees on the count
+    if (parts.containsKey(idx)) return
+    if (reasmBytes.get() + chunk.size > MAX_REASM_BYTES) { stLastErr = "reasm full"; return }
+    parts[idx] = chunk; reasmBytes.addAndGet(chunk.size.toLong())
+    if (parts.size >= count && (0 until count).all { parts.containsKey(it) }) {
       val whole = java.io.ByteArrayOutputStream()
       for (i in 0 until count) parts[i]?.let { whole.write(it) }
-      reasm.remove(key); reasmCount.remove(key); reasmTime.remove(key)
+      dropAssembly(key)
       deliver(node, whole.toByteArray())
     }
-    sweepReasm()
   }
 
   // Learn a peer's stable node id from its announce; map address<->node so ghosts collapse.
+  // One id per link (audit L-9): a link that has announced cannot change its id. Our own id rotation
+  // restarts the radio, so links drop and a rotating peer arrives on a fresh link. What remains open:
+  // a new link can still CLAIM an id another link already announced; ids are unauthenticated, the
+  // app-level AEAD is the integrity boundary (SECURITY.md, BLE).
   private fun onAnnounce(addr: String, frame: ByteArray) {
+    if (frame.size - 1 > 16) return
     val node = String(frame, 1, frame.size - 1, Charsets.UTF_8)
-    if (node.isEmpty() || node == wireId) return
+    if (!WIRE_ID_RE.matches(node) || node == wireId) return
+    val known = addrToNode[addr]
+    if (known != null && known != node) { Log.d(TAG, "announce <- $addr tried to change id; ignored"); return }
+    if (known == null && !nodeToAddrs.containsKey(node) && nodeToAddrs.size >= MAX_NODES) return
     val prev = addrToNode.put(addr, node)
     nodeToAddrs.getOrPut(node) { java.util.concurrent.ConcurrentHashMap.newKeySet<String>() }.add(addr)
     if (prev != node) Log.d(TAG, "announce <- $addr is node ${node.take(6)} (links=${nodeToAddrs[node]?.size})")
@@ -689,9 +734,12 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
   // Drop partial assemblies older than the timeout so one lost fragment can't wedge a buffer.
   private fun sweepReasm() {
     val now = System.currentTimeMillis()
-    for (k in reasmTime.filterValues { now - it > REASM_TIMEOUT_MS }.keys) {
-      reasm.remove(k); reasmCount.remove(k); reasmTime.remove(k)
-    }
+    for (k in reasmTime.filterValues { now - it > REASM_TIMEOUT_MS }.keys) dropAssembly(k)
+    for (k in fragWindow.filterValues { now - it[0] > 60_000 }.keys) fragWindow.remove(k)
+  }
+  private fun dropAssembly(k: String) {
+    reasm.remove(k)?.let { m -> reasmBytes.addAndGet(-m.values.sumOf { it.size }.toLong()) }
+    reasmCount.remove(k); reasmTime.remove(k)
   }
 
   // A link to `addr` is gone — forget its identity mapping, queue, mtu, and reasm buffers.
@@ -702,7 +750,8 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
     setupDone.remove(addr); inFlightSince.remove(addr)
     addrToNode.remove(addr)?.let { node -> nodeToAddrs[node]?.let { it.remove(addr); if (it.isEmpty()) nodeToAddrs.remove(node) } }
     inFlight.remove(addr); sendQ.remove(addr); mtu.remove(addr); discovered.remove(addr); announceTries.remove(addr)
-    for (k in reasm.keys.filter { it.startsWith("$addr/") }) { reasm.remove(k); reasmCount.remove(k); reasmTime.remove(k) }
+    for (k in reasm.keys.filter { it.startsWith("$addr/") }) dropAssembly(k)
+    fragWindow.remove(addr); lastAnnounceAnswer.remove(addr)
   }
 
   // Distinct NODE ids reachable over a live link (client or server) that have announced.
