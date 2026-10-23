@@ -695,11 +695,10 @@ class LoamMeshModule(private val ctx: ReactApplicationContext) : ReactContextBas
     if (count == 0 || idx >= count) return            // L-14: a 0-count frame is not a message
     if (count == 1) { deliver(node, chunk); return }
     val key = "$addr/$id"
-    var parts = reasm[key]
-    if (parts == null) {
+    val parts: MutableMap<Int, ByteArray> = reasm[key] ?: run {
       if (reasm.size >= MAX_ASSEMBLIES || reasm.keys.count { it.startsWith("$addr/") } >= MAX_ASSEMBLIES_PER_LINK) { stLastErr = "reasm full"; return }
-      parts = reasm.getOrPut(key) { ConcurrentHashMap() }
       reasmCount[key] = count; reasmTime[key] = nowMs
+      reasm.getOrPut(key) { ConcurrentHashMap() }
     }
     if (reasmCount[key] != count) return               // a fragment that disagrees on the count
     if (parts.containsKey(idx)) return
