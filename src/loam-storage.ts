@@ -12,7 +12,7 @@ const Client = (NativeModules as any).LogosDeliveryClient;
 
 export type JobState = "none" | "queued" | "fetching" | "done" | "failed" | "cancelled";
 export interface JobStatus { cid: string; state: JobState; bytes?: number; total?: number; error?: string }
-export interface StorageInfo { running: boolean; online: boolean; cacheBytes: number; cacheFiles: number; cacheCap: number; jobs: JobStatus[]; nodeError?: string }
+export interface StorageInfo { enabled?: boolean; state?: "off" | "idle" | "running" | "fetching" | "failed"; running: boolean; online: boolean; cacheBytes: number; cacheFiles: number; cacheCap: number; jobs: JobStatus[]; nodeError?: string }
 export interface Peer { peerId: string; addrs: string[]; spr?: string }
 
 const parse = <T>(s: unknown): T | null => {
@@ -23,8 +23,8 @@ const parse = <T>(s: unknown): T | null => {
 /** Loam with Storage is reachable (the client is bound and the service answers storageInfo). */
 export async function available(): Promise<boolean> {
   if (!Client?.storageInfo) return false;
-  const i = parse<StorageInfo & { error?: string }>(await Client.storageInfo());
-  return !!i && !i.error;
+  const i = parse<StorageInfo & { error?: string; enabled?: boolean }>(await Client.storageInfo());
+  return !!i && !i.error && i.enabled !== false;   // the owner can turn Storage off in Loam
 }
 export async function info(): Promise<StorageInfo | null> { return Client?.storageInfo ? parse(await Client.storageInfo()) : null; }
 
