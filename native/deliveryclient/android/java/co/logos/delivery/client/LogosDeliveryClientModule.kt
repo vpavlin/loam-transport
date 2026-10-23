@@ -117,6 +117,34 @@ class LogosDeliveryClientModule(private val ctx: ReactApplicationContext) : Reac
   @ReactMethod fun requestStoreSync() { try { svc?.requestStoreSync(appId) } catch (_: Throwable) {} }
   @ReactMethod fun metrics(promise: Promise) { promise.resolve(try { svc?.metrics() ?: "{}" } catch (_: Throwable) { "{}" }) }
   @ReactMethod fun disconnect() { try { svc?.unregisterClient(appId); ctx.unbindService(conn) } catch (_: Throwable) {}; svc = null }
+  // ── Logos Storage through Loam (ADR 0020). Each returns the service's JSON, or "" when this Loam has
+  // no Storage (an older service answers null / throws for an unknown transaction). Off the UI thread.
+  private fun storageCall(promise: Promise, block: (ILogosDelivery) -> String?) {
+    Thread {
+      val s = svc
+      if (s == null) { promise.resolve(""); return@Thread }
+      promise.resolve(try { block(s) ?: "" } catch (_: Throwable) { "" })
+    }.start()
+  }
+  @ReactMethod fun storageFetch(cid: String, peersJson: String, promise: Promise) = storageCall(promise) { it.storageFetch(appId, cid, peersJson) }
+  @ReactMethod fun storageStatus(cid: String, promise: Promise) = storageCall(promise) { it.storageStatus(appId, cid) }
+  @ReactMethod fun storageCancel(cid: String, promise: Promise) = storageCall(promise) { it.storageCancel(appId, cid) }
+  @ReactMethod fun storageInfo(promise: Promise) = storageCall(promise) { it.storageInfo(appId) }
+  // Copy a finished CID out of Loam's cache into a file this app owns. Resolves the byte count;
+  // rejects when Loam has no such file (not done yet, not approved, or an older Loam).
+  @ReactMethod fun storageSaveTo(cid: String, path: String, promise: Promise) {
+    Thread {
+      try {
+        val pfd = svc?.storageOpen(appId, cid) ?: throw IllegalStateException("Loam has no finished file for this CID")
+        val out = java.io.File(path); out.parentFile?.mkdirs()
+        val tmp = java.io.File("$path.part")
+        var n = 0L
+        android.os.ParcelFileDescriptor.AutoCloseInputStream(pfd).use { inp -> tmp.outputStream().use { o -> n = inp.copyTo(o, 1 shl 16) } }
+        if (!tmp.renameTo(out)) throw IllegalStateException("could not write $path")
+        promise.resolve(n.toDouble())
+      } catch (t: Throwable) { promise.reject("storage_save", t.message ?: "failed") }
+    }.start()
+  }
   @ReactMethod fun addListener(eventName: String) {}
   @ReactMethod fun removeListeners(count: Int) {}
 }
