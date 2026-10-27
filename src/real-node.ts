@@ -366,16 +366,23 @@ export class RealNode implements UnderlyingNode {
       // Skipping doesn't count as an attempt: the backoff grows only for dials that didn't help.
       if (!(await this.isOnline())) return;
       this.lastReconnectMs = Date.now();
-      this.redialGapMs = Math.min(this.redialGapMs * 2, 600000);   // reset to 45 s when peers appear
-      // Two random entry nodes, short timeout: connect() is a synchronous native call that holds the
-      // shared native-module thread (BLE sends, marks) while it waits.
-      const peers = [...this.d.entryNodes].sort(() => Math.random() - 0.5).slice(0, 2);
-      mark(`redial peerless -> ${peers.length} entry nodes`);
-      let ok = 0;
+      this.redialGapMs = Math.min(this.redialGapMs * 2, 120000);   // reset to 45 s when peers appear
+      // Entry nodes in random order, one at a time, until one gives us a peer. Not just two: in
+      // October 2026 four of the six fleet entry nodes were down, so "two at random" missed both 40%
+      // of the time and a phone sat at 0 peers for hours behind a 10-minute backoff. Short timeout:
+      // connect() is a synchronous native call that holds the shared native-module thread (BLE
+      // sends, marks) while it waits; dead nodes mostly fail fast (refused / unreachable).
+      const peers = [...this.d.entryNodes].sort(() => Math.random() - 0.5);
+      mark(`redial peerless -> up to ${peers.length} entry nodes`);
+      let ok = 0, tried = 0;
       for (const peer of peers) {
-        try { await LogosMessaging.connect(ctx, peer, 3000); ok++; } catch { /* unreachable */ }
+        if (!this.ready || this.ctx !== ctx) break;   // stopped meanwhile
+        tried++;
+        try { await LogosMessaging.connect(ctx, peer, 3000); ok++; } catch { continue; /* unreachable */ }
+        await this.refreshPeerInfo();
+        if (this.d.counters.peers > 0) break;
       }
-      mark(`redial done ok=${ok}`);   // subscriptions are renewed by the regular renew tick
+      mark(`redial done tried=${tried} ok=${ok} peers=${this.d.counters.peers}`);   // subscriptions are renewed by the regular renew tick
     }
     finally { this.reconnecting = false; }
   }
