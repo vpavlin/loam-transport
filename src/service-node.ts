@@ -111,7 +111,32 @@ export class ServiceNode implements UnderlyingNode {
     this.joinedTopics.add(topic);
     if (this.ready) await Client.subscribe(topic);
   }
-  async unsubscribe(_topic: string): Promise<void> { /* service-side; no per-topic unsub yet */ }
+  async unsubscribe(topic: string): Promise<void> {
+    if (!this.joinedTopics.delete(topic)) return;
+    // Loam >= 0.0.66 stops receiving + caching it for us; an older Loam has no such call (ignored).
+    try { if (typeof Client.unsubscribe === "function") await Client.unsubscribe(topic); } catch { /* */ }
+  }
+
+  /**
+   * Ask Loam what it holds for THIS app, and repair it: register again when Loam doesn't know us (its JS
+   * restarted, or it missed our register), subscribe again any topic it lacks. Returns Loam's answer, or
+   * null for an older Loam without the call. {authorized, registered, js, node, peers, topics, missing}.
+   */
+  async checkWithLoam(): Promise<any | null> {
+    if (!Client || typeof Client.clientState !== "function") return null;
+    let st: any;
+    try { const raw = await Client.clientState(JSON.stringify([...this.joinedTopics])); if (!raw) return null; st = JSON.parse(raw); }
+    catch { return null; }
+    if (st.authorized && !st.registered) {
+      try { await Client.register(this.appId); } catch { /* */ }
+      for (const t of this.joinedTopics) { try { await Client.subscribe(t); } catch { /* */ } }
+      st.repaired = "registered again";
+    } else if (st.authorized && Array.isArray(st.missing) && st.missing.length) {
+      for (const t of st.missing) if (this.joinedTopics.has(t)) { try { await Client.subscribe(t); } catch { /* */ } }
+      st.repaired = `subscribed ${st.missing.length} topic(s) again`;
+    }
+    return st;
+  }
 
   async send(topic: string, sealed: Uint8Array): Promise<void> {
     if (!this.ready) { if (this.txDiag) this.txDiag.txErr = "node-null"; throw new Error("node-null"); }
@@ -135,6 +160,18 @@ export class ServiceNode implements UnderlyingNode {
     // so _onCandidates isn't used on this path. Requires a Loam service that handles requestStoreSync.
     if (!Client || typeof Client.requestStoreSync !== "function") {
       this.storeInfo = "store: shared node has no store proxy (update Loam)";
+      return { msgs: 0, events: 0, detail: this.storeInfo };
+    }
+    // Loam >= 0.0.66: check (and repair) what Loam holds for us first, then ask for a pull that says
+    // whether it was taken. Nothing fails silently: the detail names why a pull couldn't run.
+    const st = await this.checkWithLoam();
+    if (st && typeof Client.requestStoreSyncChecked === "function") {
+      if (!st.authorized) { this.storeInfo = "store: this app isn't approved in Loam"; return { msgs: 0, events: 0, detail: this.storeInfo }; }
+      let ans: any = null;
+      try { const raw = await Client.requestStoreSyncChecked(); ans = raw ? JSON.parse(raw) : null; } catch { ans = null; }
+      const fix = st.repaired ? `; ${st.repaired}` : "";
+      if (ans && ans.accepted) this.storeInfo = `store: Loam accepted (${ans.topics ?? "?"} topics${ans.queued ? ", Loam starting" : ""}${st.node === false ? ", node not connected yet" : ""})${fix}`;
+      else this.storeInfo = `store: Loam refused (${ans?.reason ?? "no answer"})${fix}`;
       return { msgs: 0, events: 0, detail: this.storeInfo };
     }
     try { Client.requestStoreSync(); } catch { /* */ }

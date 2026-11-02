@@ -151,6 +151,14 @@ export class Tenant {
     await this.broker._subscribe(this.id, topic);
   }
 
+  // The app no longer wants this topic: stop routing (and caching) it for this tenant, and drop what is
+  // buffered for it. The node leaves the topic when no other tenant owns it.
+  async unsubscribe(topic: string): Promise<void> {
+    if (!this.topics.delete(topic)) return;
+    this.buffer = this.buffer.filter((m) => m.topic !== topic);
+    await this.broker._unsubscribe(this.id, topic);
+  }
+
   // App backgrounded / client unbound, but this tenant caches: DROP the live callback
   // yet KEEP the subscription — incoming messages now buffer instead of being lost.
   // (No unsubscribe: that's the whole point.) For a non-caching tenant the service

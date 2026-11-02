@@ -115,6 +115,11 @@ class LogosDeliveryClientModule(private val ctx: ReactApplicationContext) : Reac
     catch (t: Throwable) { if (done.compareAndSet(false, true)) promise.resolve("{\"error\":\"update Loam (${t.javaClass.simpleName})\"}") }
   }
   @ReactMethod fun requestStoreSync() { try { svc?.requestStoreSync(appId) } catch (_: Throwable) {} }
+  // Loam >= 0.0.66 (APPENDED AIDL methods). Each resolves Loam's JSON, or "" when not bound or when an
+  // older Loam lacks the call (an unknown Binder transaction replies null / throws). Off the UI thread.
+  @ReactMethod fun clientState(topicsJson: String, promise: Promise) = storageCall(promise) { it.clientState(appId, topicsJson) }
+  @ReactMethod fun requestStoreSyncChecked(promise: Promise) = storageCall(promise) { it.requestStoreSyncChecked(appId) }
+  @ReactMethod fun unsubscribe(topic: String) { try { svc?.unsubscribe(appId, topic) } catch (_: Throwable) {} }
   @ReactMethod fun metrics(promise: Promise) { promise.resolve(try { svc?.metrics() ?: "{}" } catch (_: Throwable) { "{}" }) }
   @ReactMethod fun disconnect() { try { svc?.unregisterClient(appId); ctx.unbindService(conn) } catch (_: Throwable) {}; svc = null }
   // ── Logos Storage through Loam (ADR 0020). Each returns the service's JSON, or "" when this Loam has

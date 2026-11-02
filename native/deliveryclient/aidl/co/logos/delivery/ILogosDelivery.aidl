@@ -31,4 +31,15 @@ interface ILogosDelivery {
     ParcelFileDescriptor storageOpen(String appId, String cid);
     // {running, online, cacheBytes, cacheFiles, cacheCap, jobs:[…]}
     String storageInfo(String appId);
+    // Client state + checked store pull + unsubscribe (Loam 0.0.66, 2026-11-02), APPENDED — never insert above.
+    // clientState answers at once from what the service holds for THIS app (topicsJson = the topics the
+    // client believes it joined): {"authorized","registered","js","node","peers","topics","missing":[…]}.
+    // A client that is not registered, or has missing topics, registers / subscribes again before it relies
+    // on the service. An older Loam replies null: the client keeps the old fire-and-forget behaviour.
+    String clientState(String appId, String topicsJson);
+    // A store pull that says whether it was taken: {"accepted":true,"topics":n} or {"accepted":false,"reason"}.
+    // The messages still arrive on the callback, like live ones.
+    String requestStoreSyncChecked(String appId);
+    // The app no longer wants this topic: Loam stops receiving and caching it for the app.
+    void unsubscribe(String appId, String topic);
 }

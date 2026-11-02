@@ -270,6 +270,23 @@ export function clientStoreSync(appId: string): Promise<{ msgs: number; events: 
 export function clientSubscribe(appId: string, topic: string): Promise<void> {
   ensure(); const t = shared!.tenants.get(appId); return t ? t.subscribe(topic) : Promise.resolve();
 }
+export function clientUnsubscribe(appId: string, topic: string): Promise<void> {
+  ensure(); const t = shared!.tenants.get(appId); return t ? t.unsubscribe(topic) : Promise.resolve();
+}
+// An approved app that is NOT connected right now (Loam just started, or the app is closed): create its
+// tenant DETACHED (no live callback) with caching on, and join the topics it used before, so messages for
+// it are received and buffered until it connects (registerClient then reattaches and drains them).
+// A tenant that already exists keeps its callback; only missing topics are joined.
+export async function restoreClient(appId: string, topics: string[], cacheLimit: number): Promise<Tenant> {
+  ensure();
+  const t = shared!.registerTenant(appId, { cacheLimit });
+  for (const topic of topics) if (!t.topics.has(topic)) { try { await t.subscribe(topic); } catch { /* retried on the next subscribe */ } }
+  return t;
+}
+/** Is this client's tenant connected (live callback) right now? */
+export function clientAttached(appId: string): boolean {
+  ensure(); return !!shared!.tenants.get(appId)?.cb;
+}
 // Client unbound. A caching client DETACHES (keep the subscription + buffer, unless
 // `hard`); a non-caching one (or hard opt-out) CLOSES (unsubscribe + drop).
 export function unregisterClient(appId: string, opts?: { hard?: boolean }): Promise<void> {
@@ -491,6 +508,13 @@ export async function join(topics: string[]): Promise<void> {
   // return` early-exit dropped a room joined during the shared-node bind window ENTIRELY — no
   // record, no retry — so the app silently never received on it. That defeated dbcf031.
   for (const t of topics) if (!tenant!.topics.has(t)) await tenant!.subscribe(t);
+}
+
+// Stop receiving topics this app joined (e.g. a removed repo). On the shared node, Loam stops receiving and
+// caching them for the app (an older Loam ignores it).
+export async function leave(topics: string[]): Promise<void> {
+  ensure();
+  for (const t of topics) if (tenant!.topics.has(t)) { try { await tenant!.unsubscribe(t); } catch { /* */ } }
 }
 
 export async function stop(): Promise<void> { running = false; if (backend) await backend.stop(); }
