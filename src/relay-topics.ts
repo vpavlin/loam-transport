@@ -11,7 +11,10 @@
 // Per topic, so apps sharing one node keep their own choice. The default lists Scala so the Loam
 // app (the shared node other apps reach over AIDL) does the same for Scala without a new AIDL call.
 
-const prefixes = new Set<string>(["/scala/"]);
+// Backpack too: its update notes are signed and the newest wins, its publishers send them over plain
+// relay, and a channel per repo topic only added a channelCreate that could fail and leave the topic
+// pending (no Store pull for it, 2026-11-03).
+const prefixes = new Set<string>(["/scala/", "/backpack/"]);
 
 /** Topics starting with `prefix` use plain relay ("relay") or SDS channels ("channels"). Call
  *  before the topic is joined; a joined topic keeps its mode until the node restarts. */

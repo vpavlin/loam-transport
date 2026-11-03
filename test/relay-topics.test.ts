@@ -2,6 +2,7 @@ import assert from "node:assert";
 import { setTopicMode, isRelayTopic } from "../src/relay-topics.ts";
 
 assert.equal(isRelayTopic("/scala/1/abc/json"), true, "Scala calendars use relay by default");
+assert.equal(isRelayTopic("/backpack/1/abc/json"), true, "Backpack update notes use relay by default");
 assert.equal(isRelayTopic("/qaku/1/abc/proto"), false, "other apps keep channels");
 assert.equal(isRelayTopic("/kith/1/x/json"), false);
 setTopicMode("/kith/", "relay");

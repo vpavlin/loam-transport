@@ -224,6 +224,10 @@ export async function serviceDiag(): Promise<string> {
 
 export function deliveryAvailable(): boolean { return RealNode.available() || ServiceNode.available(); }
 export function getStoreInfo(): string { return backend ? backend.storeInfo : ""; }
+/** For diagnostics (the Loam app's status dump): the node's joined and pending topics; null on a service client. */
+export function nodeTopicState(): { joined: string[]; pending: string[] } | null {
+  return backend instanceof RealNode ? backend.topicState() : null;
+}
 export function getCtx(): string { return backend ? backend.getCtx() : ""; }
 
 // ---- multi-tenant API for the shared-delivery SERVICE ----

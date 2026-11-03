@@ -86,6 +86,8 @@ export class RealNode implements UnderlyingNode {
     return hex;
   }
   isReady(): boolean { return this.ready; }
+  /** For diagnostics: topics joined on the node, and topics still waiting for a (re)try. */
+  topicState(): { joined: string[]; pending: string[] } { return { joined: [...this.joinedTopics], pending: [...this.pendingTopics] }; }
   getCtx(): string { return this.ready ? this.ctx : ""; }
 
   // KYM joinRoute — subscribe THEN channelCreate. Uses the local ctx during bring-up. A relay topic
@@ -279,7 +281,10 @@ export class RealNode implements UnderlyingNode {
   }
   private async storeSyncNow(onCandidates: (topic: string, candidates: Uint8Array[], meta?: RxMeta) => boolean, topics?: string[]): Promise<{ msgs: number; events: number; detail: string }> {
     const now = Date.now();
-    const wanted = (topics ?? [...this.joinedTopics]).filter((t) => this.joinedTopics.has(t) && now - (this.storeFetchedAt.get(t) || 0) > RealNode.STORE_FRESH_MS);
+    // A topic whose join is still pending (its subscribe or channelCreate failed; the renew tick retries
+    // it) is queried too: Store needs no subscription, and skipping it answered "accepted" with nothing.
+    const known = (t: string) => this.joinedTopics.has(t) || this.pendingTopics.has(t);
+    const wanted = (topics ?? [...this.joinedTopics]).filter((t) => known(t) && now - (this.storeFetchedAt.get(t) || 0) > RealNode.STORE_FRESH_MS);
     mark(`storeSync ${wanted.length}/${(topics ?? [...this.joinedTopics]).length} topics`);
     if (wanted.length === 0) return { msgs: 0, events: 0, detail: this.storeInfo || "store: up to date" };
     if (!(await this.isOnline())) return { msgs: 0, events: 0, detail: "store: offline" };
