@@ -16,6 +16,7 @@ import { ServiceNode } from "./service-node";
 import { BleMeshBearer, makeFrame } from "./bearer";
 import type { MeshRadio } from "./bearer";
 import { withUnwrappedSegments } from "./segment-compat";
+import { rawPayloadCandidates } from "./payload";
 
 // Per-stage diagnostic counters (surface in a Sync card). rxOpened/rxOpenFail are the
 // app's open() outcome, reported back via onReceive's return value.
@@ -93,26 +94,13 @@ function buildConfig(): any {
     : { mode: "Core", preset: FLEET_PRESET, relay: true, entryNodes: ENTRY_NODES, tcpPort: 0, discv5Discovery: true };
 }
 
-// KYM payloadCandidates — verbatim. Passed into RealNode so its listener/store stay pure.
+// KYM payloadCandidates. Passed into RealNode so its listener/store stay pure. The base64 steps live in
+// ./payload (Node tests run them against the shared delivery vectors of loam-basecamp
+// core/test/delivery_vectors.json). A desktop on delivery >= 0.3.0 (lib v0.39) wraps channel content
+// in a LIP-243 SegmentMessage that our v0.38.1 library passes through: offer the unwrapped payload
+// (and its base64 decodings) too.
 export function payloadCandidates(payload: any): Uint8Array[] {
-  const out: Uint8Array[] = [];
-  if (Array.isArray(payload)) {
-    let s = "";
-    for (let i = 0; i < payload.length; i++) s += String.fromCharCode(payload[i] & 0xff);
-    let once: Uint8Array | null = null;
-    try { once = toByteArray(s); out.push(once); } catch { /* not base64 text */ }
-    if (once) { try { out.push(toByteArray(fromUtf8(once))); } catch { /* not double */ } }
-    out.push(Uint8Array.from(payload.map((b: number) => b & 0xff)));
-  } else if (typeof payload === "string") {
-    try {
-      const once = toByteArray(payload);
-      out.push(once);
-      try { out.push(toByteArray(fromUtf8(once))); } catch { /* not double */ }
-    } catch { /* not base64 */ }
-  }
-  // A desktop on delivery >= 0.3.0 (lib v0.39) wraps channel content in a LIP-243 SegmentMessage that
-  // our v0.38.1 library passes through: offer the unwrapped payload (and its base64 decodings) too.
-  return withUnwrappedSegments(out);
+  return withUnwrappedSegments(rawPayloadCandidates(payload));
 }
 
 // ---- the one node, behind the broker seam ----
